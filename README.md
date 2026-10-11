@@ -2,11 +2,9 @@
 
 [![License: GPL-2.0-or-later OR LGPL-3.0-or-later](https://img.shields.io/badge/License-GPL--2.0--or--later%20OR%20LGPL--3.0--or--later-blue.svg)](LICENSE) [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/D2AM9mrDgs)
 
-> **Beta.** The C API has largely stabilized, and it changes only by addition
-> ([docs/api.md](docs/api.md) section 1). The work now is on platform- and driver-specific
-> differences, so what you see can still vary between hosts and their GPUs. `reims-ctl` and its VM
-> settings, QEMU's device options, the crate layout and the supported host/guest pathways may still
-> change without a compatibility guarantee.
+> **Beta.** `reims-ctl` creates, boots and manages your macOS VMs. The work now is on platform- and
+> driver-specific differences, so what you see can still vary between hosts and their GPUs.
+> `reims-ctl`'s commands and VM settings, and the supported host/guest pathways, may still change.
 
 reims-vgpu is an experimental virtual GPU for macOS guests. It lets macOS running inside a VM use
 accelerated graphics instead of a basic framebuffer, with the guest operating system unchanged.
