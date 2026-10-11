@@ -89,7 +89,11 @@ pub enum Cmd {
     /// Zip a VM's logs, settings and the host's details into Downloads, for a bug report
     Report { name: String },
     /// Update reims-ctl and its QEMU from the checkout it was installed from
-    Update,
+    Update {
+        /// Switch the checkout to this channel first; later updates stay on it
+        #[arg(long, value_enum)]
+        channel: Option<update::Channel>,
+    },
     /// Check the host and the install
     Doctor,
     /// The interactive interface (what reims-ctl runs with no command)
@@ -394,7 +398,7 @@ pub fn main(cli: Cli) -> Result<i32> {
                 );
             }
         }
-        Cmd::Update => update::update()?,
+        Cmd::Update { channel } => update::update(channel)?,
         Cmd::Doctor => return doctor(host),
         Cmd::Tui => unreachable!(),
         Cmd::VulkanProbe => return Ok(gpu::probe_main()),
@@ -975,7 +979,12 @@ fn doctor(host: Host) -> Result<i32> {
         Some(i) => line(
             true,
             "checkout",
-            format!("{} at {}", i.repo.display(), i.commit),
+            format!(
+                "{} at {}, following {}",
+                i.repo.display(),
+                i.commit,
+                update::following(&i.repo)
+            ),
         ),
         None => line(
             false,

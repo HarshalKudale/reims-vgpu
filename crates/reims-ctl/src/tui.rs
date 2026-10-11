@@ -10,6 +10,7 @@ use crate::create::{self, DiskSource, ImportMode, Spec};
 use crate::form::{self, Field, Form, opts};
 use crate::gpu::GpuInfo;
 use crate::host::{Host, Os, Profile};
+use crate::update::Channel;
 use crate::vm::{Registry, Vm, format_mib, parse_size_mib};
 use crate::{install, logs, paths, runtime, update};
 use anyhow::{Context, Result, bail};
@@ -33,15 +34,15 @@ pub fn run() -> Result<()> {
     ratatui::restore();
     result?;
     if app.update_requested {
-        return run_update();
+        return run_update(app.update_channel);
     }
     Ok(())
 }
 
 /// Runs the update in the plain terminal, then the new reims-ctl in this process's place.
-fn run_update() -> Result<()> {
+fn run_update(channel: Option<Channel>) -> Result<()> {
     println!("Updating reims-ctl and its QEMU…\n");
-    update::update()?;
+    update::update(channel)?;
     println!("\nUpdated. Starting the new reims-ctl…");
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
@@ -97,7 +98,7 @@ enum Action {
     None,
     Delete { vm: String, keep_files: bool },
     ForceStop(String),
-    Update,
+    Update(Option<Channel>),
     Quit,
 }
 
@@ -124,6 +125,7 @@ struct App {
     last_registry: Instant,
     quit: bool,
     update_requested: bool,
+    update_channel: Option<Channel>,
     pending_select: Option<String>,
 }
 
@@ -153,6 +155,7 @@ impl App {
             last_registry: Instant::now(),
             quit: false,
             update_requested: false,
+            update_channel: None,
             pending_select: None,
         };
         app.reload()?;
@@ -510,8 +513,9 @@ impl App {
         match a {
             Action::None => {}
             Action::Quit => self.quit = true,
-            Action::Update => {
+            Action::Update(channel) => {
                 self.update_requested = true;
+                self.update_channel = channel;
                 self.quit = true;
             }
             Action::Delete { vm, keep_files } => match delete_vm(&vm, keep_files) {
@@ -645,14 +649,27 @@ impl App {
         } else {
             String::new()
         };
+        let current = update::current_branch(&i.repo)
+            .as_deref()
+            .and_then(Channel::of);
+        let mut options = vec![("Cancel", Action::None), ("Update", Action::Update(None))];
+        for c in Channel::ALL.into_iter().filter(|&c| Some(c) != current) {
+            let label = match c {
+                Channel::Stable => "Switch to stable",
+                Channel::Development => "Switch to development",
+            };
+            options.push((label, Action::Update(Some(c))));
+        }
         self.overlay = Some(Overlay::Confirm {
             title: "Update reims-ctl?".into(),
             body: format!(
-                "This pulls {} and rebuilds reims-ctl, the library and QEMU (a few minutes; the build's output shows here), \
-                 then restarts reims-ctl.{note}",
-                paths::tilde(&i.repo)
+                "This pulls {}, which follows {}, and rebuilds reims-ctl, the library and QEMU (a few minutes; the build's \
+                 output shows here), then restarts reims-ctl.\n\nA switch checks out that channel's branch first, and \
+                 later updates stay on it: stable is master, and development gets changes first.{note}",
+                paths::tilde(&i.repo),
+                update::following(&i.repo)
             ),
-            options: vec![("Cancel", Action::None), ("Update", Action::Update)],
+            options,
             choice: 1,
         });
     }

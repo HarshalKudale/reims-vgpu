@@ -106,6 +106,7 @@ reims-ctl set mac --memory 12G --resolution host   # applies at the next start
 reims-ctl command mac           # the QEMU command it runs, as a shell script
 reims-ctl report mac            # logs, settings and the host's details, zipped, for a bug report
 reims-ctl update                # pull the checkout and install again
+reims-ctl update --channel development   # switch to the development branch first (stable is master)
 ```
 
 `reims-ctl help` lists every command; every option takes `--name value` or `--name=value`. A running
