@@ -9,17 +9,6 @@
 reims-vgpu is an experimental virtual GPU for macOS guests. It lets macOS running inside a VM use
 accelerated graphics instead of a basic framebuffer, with the guest operating system unchanged.
 
-macOS already includes a paravirtual GPU driver named `AppleParavirtGPU.kext`, written against the
-host side Apple ships as `ParavirtualizedGraphics.framework`. reims-vgpu replaces that framework.
-It takes the guest's GPU command stream and runs it on Metal on a Mac, or on Vulkan on Linux
-through [`metal2vulkan`](https://github.com/steelbrain/metal2vulkan), and can draw each guest
-display into a window of its own. QEMU's `apple-gfx` devices link it, on a Mac as on Linux. There is no custom
-macOS kext and no guest driver to install.
-
-Contributions are welcome. I am especially interested in collaborating with developers who want to
-work on correctness, visual glitches, synchronization bugs, command-stream decoding, Metal/Vulkan
-translation, and making more host/guest combinations reliable.
-
 ![reims-vgpu running an arm64 macOS 13 Ventura guest desktop on an Apple Silicon host](assets/readme/reims-vgpu-macos-arm64-desktop.png)
 
 *arm64 macOS 13 Ventura guest on an Apple Silicon host.*
@@ -27,31 +16,6 @@ translation, and making more host/guest combinations reliable.
 ![reims-vgpu running an x86_64 macOS 13 Ventura guest desktop on a Linux host](assets/readme/reims-vgpu-macos-x86-desktop.png)
 
 *x86_64 macOS 13 Ventura guest on a Linux host.*
-
-## Three pathways
-
-| Pathway | Host | Guest | QEMU machine and device | Platform | Run with |
-|---|---|---|---|---|---|
-| **x86-64 macOS / Linux Vulkan** | x86-64 Linux (KVM) | x86-64 macOS | `q35` through OpenCore, PCI `apple-gfx-pci` (`106b:eeee`) with its option ROM | **Vulkan** through metal2vulkan | `reims-ctl` |
-| **arm64 macOS / macOS Metal** | Apple silicon Mac (HVF) | arm64 macOS | `vmapple`, MMIO `apple-gfx-mmio` | **Metal** | `reims-ctl`, or `make vm` |
-| **arm64 macOS / macOS Vulkan** | Apple silicon Mac (HVF) | arm64 macOS | `vmapple`, MMIO `apple-gfx-mmio` | **Vulkan** through metal2vulkan, on MoltenVK | QEMU configured on `cargo xtask dist --platform vulkan`'s tree |
-
-On a Mac, Metal is the product and the default, and `reims-ctl` runs on it. The Vulkan platform
-builds there too, into `target/dist-vulkan`, so the smoke, the suite and a QEMU configured on that
-tree can run on it beside the Metal one.
-
-- The library: `crates/`. Core holds all behavior, generic over its platform; beside it are the
-  Metal and Vulkan platforms, a display's window, the Rust API and the C API
-  ([Crates](#crates)).
-- QEMU: `vendor/qemu` tracks
-  [`steelbrain/qemu-reims-vgpu@steelbrain/reims-vgpu`](https://github.com/steelbrain/qemu-reims-vgpu/tree/steelbrain/reims-vgpu):
-  `apple-gfx` in C on the C API, which finds the library through pkg-config and links it
-  statically.
-- The option ROM: `firmware/`, the PCI device's UEFI driver, in C, which an x86-64 guest's
-  firmware runs.
-- The Vulkan platform's runtime: metal2vulkan's public repository, at the commit the workspace's
-  `Cargo.toml` names. On macOS it runs on MoltenVK.
-- VMs: `reims-ctl` (`crates/reims-ctl`) creates, boots and manages them.
 
 ## Getting started
 
@@ -186,7 +150,39 @@ density, or `host`; 1920x1080 at 1× by default), which `reims-ctl`'s resolution
 set. [docs/api.md](docs/api.md) section 2 lists every setting and variable,
 `REIMS_VGPU_CENSUS_DIR`'s diagnostic among them.
 
+## Three pathways
+
+| Pathway | Host | Guest | QEMU machine and device | Platform | Run with |
+|---|---|---|---|---|---|
+| **x86-64 macOS / Linux Vulkan** | x86-64 Linux (KVM) | x86-64 macOS | `q35` through OpenCore, PCI `apple-gfx-pci` (`106b:eeee`) with its option ROM | **Vulkan** through metal2vulkan | `reims-ctl` |
+| **arm64 macOS / macOS Metal** | Apple silicon Mac (HVF) | arm64 macOS | `vmapple`, MMIO `apple-gfx-mmio` | **Metal** | `reims-ctl`, or `make vm` |
+| **arm64 macOS / macOS Vulkan** | Apple silicon Mac (HVF) | arm64 macOS | `vmapple`, MMIO `apple-gfx-mmio` | **Vulkan** through metal2vulkan, on MoltenVK | QEMU configured on `cargo xtask dist --platform vulkan`'s tree |
+
+On a Mac, Metal is the product and the default, and `reims-ctl` runs on it. The Vulkan platform
+builds there too, into `target/dist-vulkan`, so the smoke, the suite and a QEMU configured on that
+tree can run on it beside the Metal one.
+
+- The library: `crates/`. Core holds all behavior, generic over its platform; beside it are the
+  Metal and Vulkan platforms, a display's window, the Rust API and the C API
+  ([Crates](#crates)).
+- QEMU: `vendor/qemu` tracks
+  [`steelbrain/qemu-reims-vgpu@steelbrain/reims-vgpu`](https://github.com/steelbrain/qemu-reims-vgpu/tree/steelbrain/reims-vgpu):
+  `apple-gfx` in C on the C API, which finds the library through pkg-config and links it
+  statically.
+- The option ROM: `firmware/`, the PCI device's UEFI driver, in C, which an x86-64 guest's
+  firmware runs.
+- The Vulkan platform's runtime: metal2vulkan's public repository, at the commit the workspace's
+  `Cargo.toml` names. On macOS it runs on MoltenVK.
+- VMs: `reims-ctl` (`crates/reims-ctl`) creates, boots and manages them.
+
 ## Developing
+
+macOS already includes a paravirtual GPU driver named `AppleParavirtGPU.kext`, written against the
+host side Apple ships as `ParavirtualizedGraphics.framework`. reims-vgpu replaces that framework.
+It takes the guest's GPU command stream and runs it on Metal on a Mac, or on Vulkan on Linux
+through [`metal2vulkan`](https://github.com/steelbrain/metal2vulkan), and can draw each guest
+display into a window of its own. QEMU's `apple-gfx` devices link it, on a Mac as on Linux. There
+is no custom macOS kext and no guest driver to install.
 
 The guest drivers were written against Apple's framework, so what the guest and the host observe is
 the contract: API results and refusals, host callbacks and their order, guest memory, MMIO reads,
