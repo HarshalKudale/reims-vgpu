@@ -19,8 +19,9 @@ metal2vulkan's Metal-shaped runtime, which a Mac can also build on MoltenVK.
 Under process isolation it runs each guest task other than task 0 on threads
 of its own, in the host's process.
 
-[README.md](README.md) says what the project is and how it is laid out. This
-file covers what holds the code, how to check a change, and the rules for
+[README.md](README.md) says what the project is, and
+[docs/development.md](docs/development.md) how it is laid out. This file
+covers what holds the code, how to check a change, and the rules for
 changing it. [docs/architecture.md](docs/architecture.md) describes the
 code, and [docs/conventions.md](docs/conventions.md) the conventions it
 follows.
@@ -251,7 +252,8 @@ The suite's inputs:
   wrong meaning to the right bytes, and nothing flags it.
 - **Say what the code does.** Comments and docs describe the code and what
   the guest or host observes. They do not cite the earlier ports, which
-  stay at their tags (README.md, History).
+  stay at their tags (`byte-exact-parity`, `rust-port-parity`,
+  `native-parity`).
 - **arm64 on the Mac.** Every Rust binary built for macOS is arm64
   (`aarch64-apple-darwin`). rustc's arm64e target has no pointer
   authentication, and its binaries crash before `main`

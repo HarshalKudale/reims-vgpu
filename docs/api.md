@@ -233,7 +233,7 @@ Everything a host can set that shapes what the guest is offered or what the libr
 - **A mode's flags**: `RVG_DISPLAY_MODE_EDR` and `RVG_DISPLAY_MODE_10BPC` (the Rust API's `supports_edr`, `supports_10bpc`).
 - **Preferences**, in the Rust API only: `DisplayConfig::apply_preferences` takes the display's nits, and `DisplayMode::with_preferences` a mode's EDR and 10 bpc, from a `Preferences` reader the host gives. The library reads no preferences domain itself: `singleton::preferences()` answers every key absent.
 - **A display's window**: `RvgDisplayConfig.window` (above).
-- **Cargo features**, for a host that builds the library: `vulkan` (`reims-vgpu`, `reims-vgpu-c`) puts the API on the Vulkan platform, and `macos-sdl` (on by default) builds SDL3's window into the macOS library (README.md, "Features").
+- **Cargo features**, for a host that builds the library: `vulkan` (`reims-vgpu`, `reims-vgpu-c`) puts the API on the Vulkan platform, and `macos-sdl` (on by default) builds SDL3's window into the macOS library ([development.md](development.md), "Features").
 - **The environment.** The library reads these once per process; an unset or unparsable value is the default.
 
   | variable | what it does |

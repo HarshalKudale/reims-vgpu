@@ -1340,7 +1340,7 @@ which is not enough to rely on.
 The build under test is the checkout's library, in the dist tree `cargo
 xtask dist` writes (`target/dist`, or under `CARGO_TARGET_DIR`): the arm64
 `libreims_vgpu.dylib`, with the install name `@rpath/libreims_vgpu.dylib`,
-and its C header (README.md, "Dist"). It runs isolated tasks on threads of
+and its C header (development.md, "Dist"). It runs isolated tasks on threads of
 its own, in the runner's process (section 3.3). The runner is built against
 the tree `--dist` names, which `run` and `bless` default to:
 
@@ -1352,7 +1352,7 @@ cd tests/suite && python3 -m pgtest run -j 10 # target/dist ($PGTEST_DIST)
 - The library is arm64 only, as the runner is. rustc's arm64e target has no
   pointer authentication ([architecture.md](architecture.md) D32).
 - `--dist` may name the Vulkan platform's tree, `target/dist-vulkan`
-  (README.md, "Dist"). The expected files are recorded from the Metal
+  (development.md, "Dist"). The expected files are recorded from the Metal
   platform's.
 - The pass bar: every case matches its expected file, `died` and
   `watchdog` outcomes included, at the same op. `cargo xtask dist --profile

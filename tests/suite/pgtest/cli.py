@@ -47,7 +47,7 @@ FIXTURES = os.path.join(SUITE, "fixtures")
 RUNNER_SRC = os.path.join(SUITE, "runner", "pgrun.m")
 RUNNER_BUILD = os.path.join(SUITE, "runner", "build.sh")
 # The build under test: the checkout's dist tree, where `cargo xtask dist`
-# writes it in the workspace at the repository root (README.md).
+# writes it in the workspace at the repository root (docs/development.md).
 DEFAULT_DIST = os.environ.get("PGTEST_DIST") or os.path.join(REPO, "target", "dist")
 # The library the runner loads, in a dist tree.
 LIB_BIN = "lib/libreims_vgpu.dylib"
