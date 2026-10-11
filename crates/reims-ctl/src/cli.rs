@@ -883,9 +883,6 @@ fn gpus(host: Host) {
             g.device_id,
             g.driver_file.display()
         );
-        if !g.runs_guests() {
-            println!("    {}", gpu::NO_SHARED_MEMORY);
-        }
     }
     println!("Give a VM one with: reims-ctl set NAME --gpu NUMBER");
 }
@@ -989,7 +986,7 @@ fn doctor(host: Host) -> Result<i32> {
             }
             let gpus = gpu::list();
             line(
-                gpus.iter().any(|g| g.runs_guests()),
+                !gpus.is_empty(),
                 "vulkan",
                 if gpus.is_empty() {
                     "no GPU found".into()

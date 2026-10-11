@@ -141,22 +141,6 @@ pub fn preflight(vm: &Vm, host: Host) -> Result<()> {
                  yourself to the kvm group (sudo usermod -aG kvm $USER, then log in again)"
             );
         }
-        // The library dies at its first import of guest RAM on a GPU whose driver refuses shared
-        // memory (gpu.rs).
-        let gpus = crate::gpu::list();
-        if let Some(g) = crate::gpu::chosen(&c.gpu, &gpus)
-            && !g.runs_guests()
-        {
-            let other = match gpus.iter().any(|g| g.runs_guests()) {
-                true => format!(
-                    "; give the VM another GPU: reims-ctl gpus lists them, and reims-ctl set {} \
-                     --gpu NUMBER gives one",
-                    c.name
-                ),
-                false => "; this host has no GPU that can".into(),
-            };
-            bail!("{} {}{other}", g.name, crate::gpu::NO_SHARED_MEMORY);
-        }
     }
     Ok(())
 }

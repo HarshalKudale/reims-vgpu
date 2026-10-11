@@ -47,11 +47,10 @@ pins, and Cargo fetches metal2vulkan from its public repository, at the commit t
 ### x86-64 guest on Linux (KVM)
 
 1. **Host prep.** You need KVM (`/dev/kvm`) and a Vulkan driver; `reims-ctl gpus` lists the GPUs a
-   VM can be given. AMD GPUs cannot run guests yet: their Linux drivers import no shared memory,
-   and guest RAM is shared memory, so `reims-ctl gpus` marks them and a start refuses them. The
-   library's views of guest memory take a kernel mapping for each run of guest pages, so raise
-   `vm.max_map_count`: `sudo sysctl -w vm.max_map_count=1048576` covers a 12 GiB guest, and a file
-   in `/etc/sysctl.d` keeps it. `scripts/install-ctl.sh` and `reims-ctl` warn when it is too low.
+   VM can be given. The library's views of guest memory take a kernel mapping for each run of
+   guest pages, so raise `vm.max_map_count`: `sudo sysctl -w vm.max_map_count=1048576` covers a
+   12 GiB guest, and a file in `/etc/sysctl.d` keeps it. `scripts/install-ctl.sh` and `reims-ctl`
+   warn when it is too low.
 
 2. **Get OpenCore and an installer with [OSX-KVM](https://github.com/kholia/OSX-KVM)** (or ULTMOS).
    Follow that project's docs to fetch the recovery image and build OpenCore. You only need its
