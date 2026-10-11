@@ -135,6 +135,15 @@ impl Display {
         }
     }
 
+    /// The size a HiDPI desktop looks like, half the mode's pixels, where it runs one.
+    pub fn looks_like(&self) -> Option<(u32, u32)> {
+        if !self.hidpi {
+            return None;
+        }
+        let (w, h) = parse_resolution(self.resolution.trim()).ok()?;
+        hidpi_ppi(w).map(|_| (w / 2, h / 2))
+    }
+
     pub fn check(&self) -> Result<()> {
         if !(1..=8).contains(&self.count) {
             bail!("displays must be 1 to 8, not {}", self.count);
@@ -615,8 +624,10 @@ mod tests {
         d.hidpi = true;
         d.resolution = "3840x2160".into();
         assert!(d.qemu_resolution().unwrap().starts_with("3840x2160@"));
+        assert_eq!(d.looks_like(), Some((1920, 1080)));
         d.resolution = "1280x800".into();
         assert!(d.qemu_resolution().is_err());
+        assert_eq!(d.looks_like(), None);
         d.resolution = "host".into();
         assert!(d.qemu_resolution().is_err());
         d.hidpi = false;

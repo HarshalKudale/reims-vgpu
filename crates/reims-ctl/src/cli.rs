@@ -693,6 +693,9 @@ pub fn describe(vm: &Vm, host: Host) -> Vec<(String, String)> {
     if c.display.hidpi {
         disp.push_str(" HiDPI");
     }
+    if let Some((w, h)) = c.display.looks_like() {
+        disp.push_str(&format!(" (looks like {w}x{h})"));
+    }
     if c.display.borderless {
         disp.push_str(", borderless");
     }

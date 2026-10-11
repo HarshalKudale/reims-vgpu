@@ -11,7 +11,7 @@ use crate::form::{self, Field, Form, opts};
 use crate::gpu::GpuInfo;
 use crate::host::{Host, Os, Profile};
 use crate::update::Channel;
-use crate::vm::{Registry, Vm, format_mib, parse_size_mib};
+use crate::vm::{Registry, Vm, format_mib, parse_resolution, parse_size_mib};
 use crate::{install, logs, paths, runtime, update};
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
@@ -346,7 +346,10 @@ impl App {
         }
         match self.overlay.take() {
             Some(Overlay::Form(kind, mut f)) => match f.handle_key(k) {
-                form::Event::None => self.overlay = Some(Overlay::Form(kind, f)),
+                form::Event::None => {
+                    display_help(&mut f);
+                    self.overlay = Some(Overlay::Form(kind, f))
+                }
                 form::Event::Cancel => {}
                 form::Event::Submit => match self.submit(&kind, &f) {
                     Ok(()) => {}
@@ -902,16 +905,31 @@ impl App {
             }
         }
         fields.extend([
-            Field::text("displays", "Displays", "1", "1 to 8, each in a window of its own."),
-            Field::text("resolution", "Resolution", "1920x1080", "The guest's first mode: WIDTHxHEIGHT, or host for the host screen's own modes and density."),
-            Field::toggle("hidpi", "HiDPI", false, "Run the mode at twice the density: 3840x2160 looks like 1920x1080. Needs a width of at least 1920."),
-            Field::toggle("logs", "Logs", false, "Keep the library's log and the serial console, for bug reports."),
-            Field::text("ssh_port", "SSH port", "", "Optional: a port on 127.0.0.1 forwarded to the guest's SSH (Remote Login).").placeholder("optional"),
+            Field::text(
+                "displays",
+                "Displays",
+                "1",
+                "1 to 8, each in a window of its own.",
+            ),
+            Field::text("resolution", "Resolution", "1920x1080", RESOLUTION_HELP),
+            Field::toggle("hidpi", "HiDPI", false, HIDPI_HELP),
+            Field::toggle(
+                "logs",
+                "Logs",
+                false,
+                "Keep the library's log and the serial console, for bug reports.",
+            ),
+            Field::text(
+                "ssh_port",
+                "SSH port",
+                "",
+                "Optional: a port on 127.0.0.1 forwarded to the guest's SSH (Remote Login).",
+            )
+            .placeholder("optional"),
         ]);
-        self.overlay = Some(Overlay::Form(
-            FormKind::Create,
-            Form::new("New VM", "create", fields),
-        ));
+        let mut form = Form::new("New VM", "create", fields);
+        display_help(&mut form);
+        self.overlay = Some(Overlay::Form(FormKind::Create, form));
     }
 
     fn open_edit(&mut self) {
@@ -935,14 +953,9 @@ impl App {
                 "resolution",
                 "Resolution",
                 &c.display.resolution,
-                "WIDTHxHEIGHT, or host for the host screen's own modes and density.",
+                RESOLUTION_HELP,
             ),
-            Field::toggle(
-                "hidpi",
-                "HiDPI",
-                c.display.hidpi,
-                "Twice the density: 3840x2160 looks like 1920x1080. Needs a width of at least 1920.",
-            ),
+            Field::toggle("hidpi", "HiDPI", c.display.hidpi, HIDPI_HELP),
             Field::toggle(
                 "borderless",
                 "Borderless",
@@ -1062,10 +1075,9 @@ impl App {
         } else {
             ""
         };
-        self.overlay = Some(Overlay::Form(
-            FormKind::Edit(c.name.clone()),
-            Form::new(&format!("Edit {}{note}", c.name), "save", fields),
-        ));
+        let mut form = Form::new(&format!("Edit {}{note}", c.name), "save", fields);
+        display_help(&mut form);
+        self.overlay = Some(Overlay::Form(FormKind::Edit(c.name.clone()), form));
     }
 
     fn submit(&mut self, kind: &FormKind, f: &Form) -> Result<()> {
@@ -1460,6 +1472,43 @@ fn gpu_from_choice(id: &str, list: &[GpuInfo]) -> crate::vm::Gpu {
     }
 }
 
+const RESOLUTION_HELP: &str =
+    "The guest's first mode: WIDTHxHEIGHT, or host for the host screen's own modes and density.";
+
+const HIDPI_HELP: &str = "Run the mode at twice the density, as a Retina screen does: the desktop \
+     looks like half the mode, so a larger mode makes everything smaller (3840x2160 looks like \
+     1920x1080, 3200x1800 like 1600x900, 2560x1440 like 1280x720). Needs a mode at least 1920 \
+     pixels wide.";
+
+/// The resolution's and HiDPI's help, each ending with what the desktop looks like at the
+/// values the form holds now.
+fn display_help(f: &mut Form) {
+    if !f.is_shown("resolution") || !f.is_shown("hidpi") {
+        return;
+    }
+    let resolution = f.text("resolution");
+    let hidpi = f.toggle("hidpi");
+    let looks_like = |hidpi| {
+        crate::vm::Display {
+            resolution: resolution.clone(),
+            hidpi,
+            ..Default::default()
+        }
+        .looks_like()
+    };
+    let now = match (parse_resolution(&resolution), looks_like(true)) {
+        _ if resolution == "host" && hidpi => {
+            "host takes the host screen's own density: turn HiDPI off.".to_string()
+        }
+        (Ok(_), Some((w, h))) if hidpi => format!("Now {resolution} looks like {w}x{h}."),
+        (Ok(_), Some((w, h))) => format!("At HiDPI, {resolution} would look like {w}x{h}."),
+        (Ok((w, _)), None) if hidpi => format!("{w} pixels wide is narrower than 1920."),
+        _ => String::new(),
+    };
+    f.set_help("resolution", &format!("{RESOLUTION_HELP} {now}"));
+    f.set_help("hidpi", &format!("{HIDPI_HELP} {now}"));
+}
+
 /// The VM's installer as the edit form shows it: its full path, or empty.
 fn installer_shown(vm: &Vm) -> String {
     vm.config
@@ -1743,5 +1792,41 @@ mod tests {
     #[test]
     fn key_hints_fit_an_80_column_terminal() {
         assert!(key_hints().width() <= 80);
+    }
+
+    #[test]
+    fn display_help_says_what_the_desktop_looks_like() {
+        let now = |resolution: &str, hidpi: bool| {
+            let mut f = Form::new(
+                "t",
+                "save",
+                vec![
+                    Field::text("resolution", "Resolution", resolution, RESOLUTION_HELP),
+                    Field::toggle("hidpi", "HiDPI", hidpi, HIDPI_HELP),
+                ],
+            );
+            display_help(&mut f);
+            assert_eq!(
+                f.help("resolution").strip_prefix(RESOLUTION_HELP),
+                f.help("hidpi").strip_prefix(HIDPI_HELP)
+            );
+            f.help("hidpi")[HIDPI_HELP.len()..].trim().to_string()
+        };
+        assert_eq!(now("3200x1800", true), "Now 3200x1800 looks like 1600x900.");
+        assert_eq!(
+            now("3840x2160", false),
+            "At HiDPI, 3840x2160 would look like 1920x1080."
+        );
+        assert_eq!(
+            now("1280x800", true),
+            "1280 pixels wide is narrower than 1920."
+        );
+        assert_eq!(now("1280x800", false), "");
+        assert_eq!(
+            now("host", true),
+            "host takes the host screen's own density: turn HiDPI off."
+        );
+        assert_eq!(now("host", false), "");
+        assert_eq!(now("19x", true), "");
     }
 }
