@@ -33,6 +33,13 @@
 
 #define REIMS_VGPU_MAX_MODES  127
 
+//
+// The memory BAR through which QEMU's apple-gfx-pci shows the frame buffer
+// the EFI display's registers name: the Graphics Output Protocol gives its
+// address when the buffer reads back through it (docs/architecture.md 11.4).
+//
+#define REIMS_VGPU_FRAMEBUFFER_BAR  2
+
 typedef struct {
   UINT32    Width;
   UINT32    Height;
@@ -56,6 +63,7 @@ typedef struct {
   VOID                                    *FrameBuffer;
   EFI_PHYSICAL_ADDRESS                    FrameBufferDeviceAddress;
   VOID                                    *FrameBufferMapping;
+  EFI_PHYSICAL_ADDRESS                    FrameBufferBase;  // the Graphics Output Protocol's
 } REIMS_VGPU_PRIVATE_DATA;
 
 #define REIMS_VGPU_PRIVATE_DATA_FROM_GRAPHICS_OUTPUT_THIS(a) \

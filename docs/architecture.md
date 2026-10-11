@@ -1121,15 +1121,36 @@ driver's macros carry the device's names for them (`REIMS_VGPU_REG_EFI_ENABLE` i
 - `Start` enables the PCI device, writes 0x1200 = 1, and reads the mode list: 0x1204's count,
   then for each mode 0x1208 = i and a read of 0x120c (width | height << 16), starting over when
   0x120c reads all ones. A count of 0, or over 127, gives three modes instead: 1920 × 1200,
-  1920 × 1080 and 1600 × 1200. It allocates one buffer for the largest mode, maps it for bus
-  mastering, writes its start (0x1210) and length (0x1214), and installs the Graphics Output
-  Protocol on a child handle, whose device path is the controller's with an ACPI `_ADR` display
-  node.
+  1920 × 1080 and 1600 × 1200. It allocates one buffer for the largest mode in guest RAM, as
+  runtime services data, maps it for bus mastering, writes its start (0x1210) and length
+  (0x1214), picks the framebuffer's address (below), and installs the Graphics Output Protocol
+  on a child handle, whose device path is the controller's with an ACPI `_ADR` display node.
 - `SetMode` writes the depth (0x1218 = 32) and the mode (0x121c). The framebuffer is linear and
   `PixelBlueGreenRedReserved8BitPerColor`, 4 × width bytes a row; the driver writes no stride,
   and the device takes a stride of 0 as 4 × width.
-- `Blt` does its four operations on the framebuffer in guest memory. The device presents that
-  memory on its 100 ms timer, since QEMU gives it no trace callback (12).
+- `Blt` does its four operations on the buffer in guest RAM. The device presents that memory on
+  its 100 ms timer, since QEMU gives it no trace callback (12).
+
+**The framebuffer's address.** The protocol's `FrameBufferBase`, which boot.efi hands the
+kernel, is BAR 2's address where BAR 2 shows the buffer, and else the buffer's own. QEMU's
+`apple-gfx-pci` makes BAR 2 a window onto the RAM at the start the driver writes (0x1210;
+docs/qemu.md, "apple-gfx on reims-vgpu"), so the registers, and what the library maps and
+presents, are the same either way.
+After its 0x1214 write the driver asks PCI I/O's `GetBarAttributes` for BAR 2: a memory BAR at
+least as long as the buffer, below 4 GiB, with no address translation. It then writes a pattern
+and its complement into the buffer's first and last dwords and reads each back through BAR 2
+(`PciIo->Mem.Read`), restoring the dwords; all four must match. A macOS with no driver of the
+device's own, an installer or recovery image, binds IOGraphics' generic `IONDRVFramebuffer`,
+which takes the boot framebuffer over only inside one of the device's memory BARs (docs/qemu.md,
+"x86-64 macOS guests: installers and recovery"). The buffer is runtime services data, which the
+OS keeps past `ExitBootServices`. macOS's boot.efi may move runtime data before the kernel runs
+(read from OpenCore's description of its `AvoidRuntimeDefrag` quirk), which would leave the
+device and BAR 2 on the old pages: the pages stay the framebuffer's only where the loader keeps
+runtime data in place. OpenCore's `AvoidRuntimeDefrag` does so: while boot.efi lays out the
+runtime memory, it marks runtime code and data that carry the runtime attribute, which edk2 gives
+this buffer, as MMIO (read from OpenCore's `OcAfterBootCompatLib` and edk2's `Page.c`).
+mac-temp's and macos-26's OpenCore configurations set it (read from their `config.plist`). Before
+BAR 2 the kernel drew to the same pages directly.
 
 **Pages.** The driver writes 0x1210 in 4 KiB pages and rounds the length up to 4 KiB, the
 x86-64 guest's pages. A library built for x86-64 counts 0x1210 in those pages and takes a length
@@ -1177,17 +1198,18 @@ is part of QEMU's binary. Meson also installs the file the package's `optionrom`
 into QEMU's data directory as `ReimsVgpu.rom`, `apple-gfx-pci`'s default `romfile` (D48).
 
 QEMU gives the device `raise_interrupt` and a memory map, and no task, memory or trace callback, and
-makes one display a port for its `displays` property (1 to 8). Its vCPU threads make the MMIO
-accesses themselves, and the IOSurface device's values are truncated to QEMU's 32 bits. Each
-display's console has a pixman surface: a pool thread encodes the display's frame into a frame
-target and reads it with `rvg_frame_target_read_pixels`, and a bottom half copies the pixels into
-the surface. Without window mode the surface follows the guest's frames only while a display
-change listener (VNC) or a screendump has asked for it within the last 6 s, and nothing is
-rendered while none does. Under `-display none`, unless `REIMS_VGPU_WINDOW=0`, it passes each
-display a window (D51), into which the library draws the guest's frames, draws the surface only
-when a screendump or a listener asks, and sends the window's input to the guest's USB tablet and
-keyboard. `docs/qemu.md` describes how it uses the API ("apple-gfx on reims-vgpu"), its configure
-lines (`make qemu` builds it against `<target>/dist`), the VM boot method and the results.
+makes one display a port for its `displays` property (1 to 8). `apple-gfx-pci` adds BAR 2, a window
+onto the guest RAM at the EFI display's start (0x1210), which the library never sees (11.4). Its vCPU
+threads make the MMIO accesses themselves, and the IOSurface device's values are truncated to QEMU's
+32 bits. Each display's console has a pixman surface: a pool thread encodes the display's frame into
+a frame target and reads it with `rvg_frame_target_read_pixels`, and a bottom half copies the pixels
+into the surface. Without window mode the surface follows the guest's frames only while a display
+change listener (VNC) or a screendump has asked for it within the last 6 s, and nothing is rendered
+while none does. Under `-display none`, unless `REIMS_VGPU_WINDOW=0`, it passes each display a
+window (D51), into which the library draws the guest's frames, draws the surface only when a
+screendump or a listener asks, and sends the window's input to the guest's USB tablet and keyboard.
+`docs/qemu.md` describes how it uses the API ("apple-gfx on reims-vgpu"), its configure lines
+(`make qemu` builds it against `<target>/dist`), the VM boot method and the results.
 
 ---
 

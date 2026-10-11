@@ -48,7 +48,7 @@ ReimsVgpuUpdateMode (
 
   Info = Mode->Info;
   ReimsVgpuSetModeInformation (Info);
-  Mode->FrameBufferBase = Private->FrameBufferDeviceAddress;
+  Mode->FrameBufferBase = Private->FrameBufferBase;
   Mode->FrameBufferSize = Info->HorizontalResolution * Info->VerticalResolution * 4;
 }
 

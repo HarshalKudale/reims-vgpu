@@ -178,6 +178,102 @@ ReimsVgpuReadRegister (
   PciIo->Mem.Read (PciIo, EfiPciIoWidthUint32, 0, Offset, 1, Value);
 }
 
+/**
+  Check that the frame buffer's dword at Index reads back through the frame
+  buffer BAR: a pattern written into the buffer, then its complement. The
+  dword is restored.
+**/
+STATIC
+BOOLEAN
+ReimsVgpuFrameBufferReadsBack (
+  IN REIMS_VGPU_PRIVATE_DATA  *Private,
+  IN UINT32                   Index
+  )
+{
+  STATIC CONST UINT32  Patterns[] = { 0x5AA5C33C, 0xA55A3CC3 };
+  volatile UINT32      *Buffer;
+  UINT32               Original;
+  UINT32               Value;
+  UINTN                Pattern;
+  BOOLEAN              ReadsBack;
+  EFI_STATUS           Status;
+
+  Buffer    = (volatile UINT32 *)Private->FrameBuffer;
+  Original  = Buffer[Index];
+  ReadsBack = TRUE;
+  for (Pattern = 0; Pattern < ARRAY_SIZE (Patterns) && ReadsBack; Pattern++) {
+    Buffer[Index] = Patterns[Pattern];
+    //
+    // The store is visible before the read through the BAR, another
+    // address of the same memory.
+    //
+    __asm__ __volatile__ ("mfence" ::: "memory");
+    Status = Private->PciIo->Mem.Read (
+                               Private->PciIo,
+                               EfiPciIoWidthUint32,
+                               REIMS_VGPU_FRAMEBUFFER_BAR,
+                               (UINT64)Index * sizeof (UINT32),
+                               1,
+                               &Value
+                               );
+    ReadsBack = !EFI_ERROR (Status) && (Value == Patterns[Pattern]);
+  }
+
+  Buffer[Index] = Original;
+  return ReadsBack;
+}
+
+/**
+  The frame buffer's address for the Graphics Output Protocol: the frame
+  buffer BAR's, where the device shows the Size bytes of the frame buffer
+  there, or else the frame buffer's own in guest RAM.
+
+  The BAR is used when it is a memory BAR of at least Size bytes, below
+  4 GiB with no address translation, and the buffer's first and last dwords
+  read back through it. QEMU's apple-gfx-pci makes BAR 2 an alias of the RAM
+  the EFI display's registers name, once they are written.
+**/
+STATIC
+EFI_PHYSICAL_ADDRESS
+ReimsVgpuFrameBufferBase (
+  IN REIMS_VGPU_PRIVATE_DATA  *Private,
+  IN UINT32                   Size
+  )
+{
+  EFI_STATUS                         Status;
+  EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR  *Bar;
+  EFI_PHYSICAL_ADDRESS               BarBase;
+  BOOLEAN                            Usable;
+
+  Status = Private->PciIo->GetBarAttributes (
+                             Private->PciIo,
+                             REIMS_VGPU_FRAMEBUFFER_BAR,
+                             NULL,
+                             (VOID **)&Bar
+                             );
+  if (EFI_ERROR (Status)) {
+    return Private->FrameBufferDeviceAddress;
+  }
+
+  BarBase = Bar->AddrRangeMin;
+  Usable  = (Bar->Desc == ACPI_ADDRESS_SPACE_DESCRIPTOR) &&
+            (Bar->ResType == ACPI_ADDRESS_SPACE_TYPE_MEM) &&
+            (Bar->AddrTranslationOffset == 0) &&
+            (Bar->AddrLen >= Size) &&
+            (BarBase < SIZE_4GB) &&
+            (Size <= SIZE_4GB - BarBase);
+  FreePool (Bar);
+
+  if (!Usable ||
+      !ReimsVgpuFrameBufferReadsBack (Private, 0) ||
+      !ReimsVgpuFrameBufferReadsBack (Private, Size / sizeof (UINT32) - 1))
+  {
+    return Private->FrameBufferDeviceAddress;
+  }
+
+  return BarBase;
+}
+
 EFI_STATUS
 EFIAPI
 ReimsVgpuDriverBindingStart (
@@ -308,6 +404,13 @@ Retry:
 
   Size  = (MaxSize + EFI_PAGE_MASK) & ~EFI_PAGE_MASK;
 
+  //
+  // Runtime services data, which the OS keeps past ExitBootServices: the
+  // device presents these pages, and the frame buffer BAR shows them. macOS's
+  // boot.efi may move runtime data, which would leave both on the old pages,
+  // unless the loader keeps it in place, as OpenCore's AvoidRuntimeDefrag
+  // quirk does.
+  //
   Status = Private->PciIo->AllocateBuffer (
                              Private->PciIo,
                              AllocateAnyPages,
@@ -345,6 +448,14 @@ Retry:
   //
   ReimsVgpuWriteRegister (Private->PciIo, REIMS_VGPU_REG_EFI_START, (UINT32)(Private->FrameBufferDeviceAddress >> EFI_PAGE_SHIFT));
   ReimsVgpuWriteRegister (Private->PciIo, REIMS_VGPU_REG_EFI_LENGTH, Size);
+
+  //
+  // The device keeps presenting the buffer in RAM; the Graphics Output
+  // Protocol gives the frame buffer BAR's address where the BAR shows it. An
+  // OS with no driver of the device's own (macOS's installers and recovery)
+  // takes the boot frame buffer over only inside one of the device's BARs.
+  //
+  Private->FrameBufferBase = ReimsVgpuFrameBufferBase (Private, Size);
 
   //
   // The Graphics Output child is an ACPI _ADR node below the controller.

@@ -101,6 +101,7 @@ merge into staging of 2026-06-19), and upstream master at `9c88811b81`
 | `apple-gfx`'s MMIO accesses call the library on the vCPU's thread, with no hop to the device's pool, and the GPU device's region takes them without the BQL under KVM ("MMIO", below) | `93afbf1f1e`, `8d81cebd5f`, `2eec63f528` |
 | `apple-gfx` builds on Linux hosts, for KVM: each range of the device's memory map has its own host address (q35's RAM above 4 GiB is an alias partway into its block) and names the file behind it, which the realize requires on Linux; the trace lists each range ("apple-gfx on reims-vgpu", below) | `c312e13367`, `2b8150f1b8`, `3ad617fb01`, `c83a31e78a` |
 | `apple-gfx` reads each frame's pixels on the pool thread, and renders the console's surface only while a display change listener shows it, or when the display system asks ("Frames", below) | `06437bde6f`, `add4929158` |
+| `apple-gfx-pci`'s BAR 2, a window onto the EFI framebuffer: one alias of the machine's RAM, moved as the guest writes the framebuffer's start, so that a macOS installer or recovery image, which has no driver of the device's own, takes the boot framebuffer over (the `efi-framebuffer-bar` property, on by default; "BAR 2" in "apple-gfx on reims-vgpu", and "x86-64 macOS guests: installers and recovery", below) | `89fc1f56ba`, `d6710a2850`, `440da86693` |
 | comments, coding style and dead code, with no functional change: the window's wheel callback, which the library never calls beside `scroll`, is gone; configure's summary says whether it found reims-vgpu on Linux too | `f3148adebd`, `e4ca06d9f7`, `5b13eebbf1`, `ef73c3c6bd`, `f624140283`, `d25256b8b0`, `6855e95b7a`, `56a956fbec` |
 
 QEMU does not release the device at its exit: the release waits for the
@@ -128,6 +129,22 @@ the library, and describes the `displays` property and window mode.
   `ReimsVgpu.rom` (5,632 bytes, built from `firmware/`), resets, and exits
   0 at `quit`. `displays=9`, `resolution=12x` and `resolution=1280x800@220`
   each fail the realize with its message.
+
+At `440da86693` (BAR 2), on 2026-10-12, paused: on this host, `virt` with
+`apple-gfx-pci` realizes it with BAR 0 (16 KiB), BAR 2 (64 MiB, 32-bit,
+prefetchable) and the ROM's BAR 6 (8 KiB), and with `efi-framebuffer-bar=off`
+without BAR 2; each exits 0 at `quit`. The same holds for `q35` under KVM on
+the RTX 5080 Laptop GPU host. Under `-accel qtest` (no guest code: the test
+writes the PCI configuration and the device's registers itself), on `virt`, in
+16 KiB pages: a write to 0x1210 alone makes BAR 2 show 64 MiB of the RAM
+there, and a write through BAR 2 lands in that RAM; a start inside BAR 2 moves
+the window on in RAM, and one 64 KiB before the end of RAM gives a 64 KiB
+window; a start at the UART, in the flash, past the end of RAM or of 0, and
+any start under NUMA, leave BAR 2 empty; a 0 to 0x1200 keeps the window, and
+`system_reset` empties it. On `q35`, in 4 KiB pages, the window ends where
+TSEG or the SMBASE window begins once the test turns them on as firmware does,
+and a start inside either leaves BAR 2 empty, as does a start of 0, which is
+RAM there.
 
 ## apple-gfx on reims-vgpu
 
@@ -198,7 +215,9 @@ How it uses the API:
   thread, which no access waits for. The GPU device's region is lockless
   (`memory_region_enable_lockless_io`): under KVM a vCPU makes its access
   without the BQL; HVF takes the BQL at every exit, and TCG at every access to
-  I/O, so under them the accesses run one at a time. Until `93afbf1f1e` each
+  I/O, so under them the accesses run one at a time. The one access that
+  takes the BQL itself is a write to 0x1210 on `apple-gfx-pci`, after the
+  library's call has returned ("BAR 2", below). Until `93afbf1f1e` each
   access went to the device's `ThreadPool` while the vCPU waited in
   `AIO_WAIT_WHILE`, holding the BQL, and one vmapple run hung there for good
   ([lessons.md](lessons.md)). The pool now runs only the renders, which it
@@ -213,10 +232,35 @@ How it uses the API:
 - **Reset.** Each bus front-end's reset calls `rvg_device_reset` in its hold
   phase. It may call back, and the device's one callback, `raise_interrupt`,
   only schedules a bottom half.
+- **BAR 2** (`apple-gfx-pci`, with its `efi-framebuffer-bar` property, on by
+  default): a 64 MiB, 32-bit, prefetchable window onto the EFI framebuffer,
+  for guests with no driver of the device's own ("x86-64 macOS guests:
+  installers and recovery", below). It holds one alias of the machine's RAM,
+  disabled at realize. After the library has taken a guest write to 0x1210
+  (the framebuffer's start), `apple_gfx_write` calls the PCI variant's
+  `mmio_written` hook, which takes the BQL (under KVM the access came without
+  it) and reads the start back from the library, since vCPUs' hooks may reach
+  the BQL in another order than their writes reached the library. It looks the
+  start up in the system memory's flat view, in the library's pages
+  (`APV_PAGE_SHIFT`: 4 KiB on an x86-64 host, 16 KiB otherwise). Where the
+  machine's RAM is there, BAR 2 shows the run of it from the start, up to
+  64 MiB, at the BAR's offset 0: only RAM the guest reaches at those addresses
+  then, so the window ends where SMRAM, a ROM or a device's region lies over
+  the RAM. A start of 0, or anything else there (a device's region, a NUMA
+  node's memory), disables the alias. The update is done before the access
+  returns, since the option ROM reads its buffer back through BAR 2 right
+  after its writes, and a repeated start changes nothing. Only 0x1210 writes
+  and a reset change BAR 2, so it shows the framebuffer from the ROM's write
+  until the next one or a reset: after EFI goes off the kernel's draws to its
+  boot framebuffer still land in RAM. QEMU leaves BAR 2 out where the machine
+  has no RAM region, or its RAM is a guest_memfd's, which KVM refuses a second
+  memory slot onto. The library never sees BAR 2: the ROM writes the RAM page
+  as before, and only the address its Graphics Output Protocol gives is
+  BAR 2's ([architecture.md](architecture.md) 11.4).
 - **Not used**, since QEMU's deployment target is 26.0: the task list and
   the memory callbacks macOS before 15.4 needed. QEMU gives the device
-  `raise_interrupt` and a memory map only. The PCI IDs, BAR and MSI count
-  come from the header (`RVG_PCI_*`).
+  `raise_interrupt` and a memory map only. The PCI IDs, BAR 0 and MSI count
+  come from the header (`RVG_PCI_*`); BAR 2 is QEMU's own.
 
 ### Window mode
 
@@ -605,6 +649,55 @@ an RTX 5080 Laptop GPU host with a macOS 26.6.1 guest on 2026-10-11:
 - A plain MP4 file plays, without sound.
 - With `usb-audio` the guest lists "QEMU" as its default output, and the
   same YouTube video plays.
+
+### x86-64 macOS guests: installers and recovery
+
+A macOS installer or recovery image boots to its Recovery UI on
+`apple-gfx-pci` because BAR 2 shows the EFI framebuffer ("BAR 2" in
+"apple-gfx on reims-vgpu", above, and [architecture.md](architecture.md)
+11.4). Without BAR 2 it stops on the Apple logo.
+
+Measured on an RTX 5080 Laptop GPU host (an Intel Core Ultra 9 275HX,
+CachyOS, KVM, `q35` with OVMF and OpenCore, headless) on 2026-10-11, with an
+x86-64 macOS 26.6.2 BaseSystem (25G83), before BAR 2:
+- The image ships no AppleParavirtGPU, so the one driver that binds the
+  device (106b:eeee, class 0x0380) is IOGraphics' generic
+  `IONDRVFramebuffer`, which takes the EFI boot framebuffer over only when
+  it lies inside one of the device's memory BARs.
+- The kernel's boot framebuffer was the option ROM's buffer in RAM
+  (`initialize_screen: b=7DED4000` on the serial console), and the device
+  had only its 16 KiB register BAR. The console logged `S20: Not usable`,
+  then `newUserClient failed: 0 0xe00002be ... IONDRVFramebuffer` over and
+  over: WindowServer aborted and launchd started it 18 times in 4 min,
+  while the screen stayed on the Apple logo's progress bar.
+- With `vmware-svga` in the device's place, whose framebuffer is its BAR 1
+  (`b=80000000`), the same image reached its Recovery UI about 63 s after
+  QEMU started.
+
+With BAR 2 (`440da86693`, and the option ROM of `0b8914ff7d`), on the same
+host, image and OpenCore, whose picker waits 45 s before it boots, so each
+time below includes that wait, with QEMU started at nice 0:
+- OVMF put BAR 2 at 0x80000000. From the ROM's write on, `info mtree` showed
+  the alias as 0x80000000-0x8212bfff onto the RAM at 0x7ded4000-0x7fffffff:
+  33 MiB, from the framebuffer to the end of the RAM below 4 GiB, since this
+  OVMF turns on neither TSEG nor the SMBASE window. It stayed until the end of
+  each run, 120 s after QEMU started.
+- The installer's kernel took `initialize_screen: b=80000000`, and its
+  Recovery UI was up at the 65 s screendump. The console has no `Not usable`
+  and no `newUserClient failed`, and launchd started WindowServer once.
+- The installed macOS 26 guest, on its disk behind `snapshot=on`, also booted
+  on BAR 2 (`b=80000000`) and reached its desktop by the 65 s screendump, its
+  Dock, wallpaper and menu bar shown. With `-d invalid_mem` QEMU logged no
+  access to BAR 2: the guest's draws to its boot framebuffer after EFI goes
+  off land in RAM. At `89fc1f56ba`, which emptied BAR 2 when EFI went off, the
+  same boot made 90 writes to it in 0.7 s, at the rows of the boot progress
+  bar, which QEMU dropped.
+- With `efi-framebuffer-bar=off` the device has no BAR 2, so the ROM gives the
+  RAM address, as before BAR 2 (`b=7DED4000`), and the same guest reached the
+  same desktop by the 65 s screendump too.
+
+Not measured: an installation run to its end, and installers and guests
+before macOS 26.
 
 ### App Nap
 

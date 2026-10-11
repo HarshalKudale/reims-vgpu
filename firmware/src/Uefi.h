@@ -78,6 +78,8 @@ typedef struct {
 #define EFI_OUT_OF_RESOURCES   EFIERR (9)
 #define EFI_ALREADY_STARTED    EFIERR (20)
 
+#define SIZE_4GB  0x100000000ULL
+
 #define EFI_PAGE_SIZE   0x1000
 #define EFI_PAGE_MASK   0xFFF
 #define EFI_PAGE_SHIFT  12
@@ -589,25 +591,61 @@ EFI_STATUS
   OUT    UINT64                                   *Result OPTIONAL
   );
 
+//
+// Resources is pool memory holding an ACPI address space descriptor for the
+// BAR, then an end tag; the caller frees it.
+//
+typedef
+EFI_STATUS
+(EFIAPI *EFI_PCI_IO_PROTOCOL_GET_BAR_ATTRIBUTES)(
+  IN  EFI_PCI_IO_PROTOCOL  *This,
+  IN  UINT8                BarIndex,
+  OUT UINT64               *Supports   OPTIONAL,
+  OUT VOID                 **Resources OPTIONAL
+  );
+
 struct _EFI_PCI_IO_PROTOCOL {
-  VOID                                   *PollMem;
-  VOID                                   *PollIo;
-  EFI_PCI_IO_PROTOCOL_ACCESS             Mem;
-  EFI_PCI_IO_PROTOCOL_ACCESS             Io;
-  EFI_PCI_IO_PROTOCOL_CONFIG_ACCESS      Pci;
-  VOID                                   *CopyMem;
-  EFI_PCI_IO_PROTOCOL_MAP                Map;
-  EFI_PCI_IO_PROTOCOL_UNMAP              Unmap;
-  EFI_PCI_IO_PROTOCOL_ALLOCATE_BUFFER    AllocateBuffer;
-  EFI_PCI_IO_PROTOCOL_FREE_BUFFER        FreeBuffer;
-  VOID                                   *Flush;
-  VOID                                   *GetLocation;
-  EFI_PCI_IO_PROTOCOL_ATTRIBUTES         Attributes;
-  VOID                                   *GetBarAttributes;
-  VOID                                   *SetBarAttributes;
-  UINT64                                 RomSize;
-  VOID                                   *RomImage;
+  VOID                                    *PollMem;
+  VOID                                    *PollIo;
+  EFI_PCI_IO_PROTOCOL_ACCESS              Mem;
+  EFI_PCI_IO_PROTOCOL_ACCESS              Io;
+  EFI_PCI_IO_PROTOCOL_CONFIG_ACCESS       Pci;
+  VOID                                    *CopyMem;
+  EFI_PCI_IO_PROTOCOL_MAP                 Map;
+  EFI_PCI_IO_PROTOCOL_UNMAP               Unmap;
+  EFI_PCI_IO_PROTOCOL_ALLOCATE_BUFFER     AllocateBuffer;
+  EFI_PCI_IO_PROTOCOL_FREE_BUFFER         FreeBuffer;
+  VOID                                    *Flush;
+  VOID                                    *GetLocation;
+  EFI_PCI_IO_PROTOCOL_ATTRIBUTES          Attributes;
+  EFI_PCI_IO_PROTOCOL_GET_BAR_ATTRIBUTES  GetBarAttributes;
+  VOID                                    *SetBarAttributes;
+  UINT64                                  RomSize;
+  VOID                                    *RomImage;
 };
+
+//
+// The QWORD address space descriptor (ACPI specification, 6.4.3.5.1), in
+// which PCI I/O's GetBarAttributes describes a BAR. A memory BAR has ResType
+// 0, its base in AddrRangeMin and its size in AddrLen.
+//
+#define ACPI_ADDRESS_SPACE_DESCRIPTOR  0x8A
+#define ACPI_ADDRESS_SPACE_TYPE_MEM    0x00
+
+#pragma pack(1)
+typedef struct {
+  UINT8     Desc;
+  UINT16    Len;
+  UINT8     ResType;
+  UINT8     GenFlag;
+  UINT8     SpecificFlag;
+  UINT64    AddrSpaceGranularity;
+  UINT64    AddrRangeMin;
+  UINT64    AddrRangeMax;
+  UINT64    AddrTranslationOffset;
+  UINT64    AddrLen;
+} EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR;
+#pragma pack()
 
 //
 // Graphics Output protocol (UEFI specification, 12.9).
