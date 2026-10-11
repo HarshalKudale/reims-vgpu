@@ -1,30 +1,40 @@
 [package]
 name = "reims-vgpu-vulkan"
-version = "0.1.0"
-edition = "2021"
-description = "The Vulkan rail: the only layer that turns host capabilities into placement and transfer policy"
-license = "GPL-2.0-or-later"
+description = "A proof of concept: the Platform implementation over metal2vulkan-runtime, on Vulkan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
 
-[lib]
-name = "reims_vgpu_vulkan"
-
-# What is not here is the claim. No QEMU, no device model, no guest-RAM
-# ownership, no decode: this crate reads what a physical device offers and
-# decides how work is placed and moved on it. A dependency on the device crate
-# would let a placement decision read device state, and a placement that can see
-# device state is one that can make the same guest stream mean two things.
 [dependencies]
-ash = "0.38"
-# The semantic model this rail executes. It supplies the lifetimes and the
-# transaction shapes; it can name nothing in here.
-reims-vgpu-core = { path = "../reims-vgpu-core" }
-# A refusal names itself on the always-on channel.
-reims-vgpu-observe = { path = "../reims-vgpu-observe" }
-# Operator switches, which may narrow what this rail does and never widen it.
-reims-vgpu-config = { path = "../reims-vgpu-config" }
+reims-vgpu-core.workspace = true
+metal2vulkan-runtime.workspace = true
+metal2vulkan.workspace = true
+# The debug lines that time the runtime's compiles (gpu/timing.rs), through core's logger.
+log.workspace = true
+# A display window's swapchain (`swapchain.rs`) and the window system's extensions
+# (`os/wsi.rs`), through ash, on either OS.
+ash.workspace = true
+
+# On macOS the OS services are the metal crate's (threads, clock, Mach VM, the autorelease pool and
+# IOSurface, `os/macos.rs`), with Metal's system default device, whose registryID the runtime's
+# default device answers (os/macos.rs's default_registry_id). The tests that compare answers with
+# the Metal platform's use it too.
+[target.'cfg(target_os = "macos")'.dependencies]
+reims-vgpu-metal.workspace = true
+
+# On Linux the OS services are this crate's own (`os/linux.rs`): threads, clocks, the views of
+# guest pages over the memory map's files, and IOSurface's stand-in.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+# The hashes of the metallibs' sources, which a metallib built elsewhere is checked by (build.rs).
+[build-dependencies]
+sha2.workspace = true
 
 [dev-dependencies]
-reims-vgpu-observe = { path = "../reims-vgpu-observe", features = ["testing"] }
-# The shared allocation-counting instrument the structural-zero suites measure
-# with. Nothing in the library depends on it.
-reims-vgpu-testkit = { path = "../reims-vgpu-testkit" }
+reims-vgpu-core = { workspace = true, features = ["testkit"] }
+
+[lints]
+workspace = true

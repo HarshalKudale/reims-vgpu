@@ -1,1186 +1,1403 @@
-//! Choosing a swapchain from what a surface reported, and refusing what it did
-//! not offer.
+//! A display window's swapchain on the runtime's own device: what the window's render thread
+//! presents through, on either OS. No copy: each of the swapchain's images is a runtime texture
+//! (`new_texture_with_vk_image`), which the display's present pass renders into in a command
+//! buffer of the frame queue, and the image is presented from the swapchain's own presenting
+//! queue. The surface is the window's: on Linux SDL's (Wayland's or X11's), on macOS one over
+//! the window's `CAMetalLayer` (`VK_EXT_metal_surface`), whose drawables MoltenVK's images are.
 //!
-//! # What this owns that the other two presentation modules do not
+//! **The presenting queue.** Each swapchain presents on a queue made for presenting
+//! (`Device::new_command_queue_for_presenting`), whose `VkQueue` the runtime reserves apart from
+//! every queue of `newCommandQueue`'s where the device has one to spare (NVIDIA's graphics family
+//! has 16): a present that blocks under its lock (FIFO on a window the compositor does not show,
+//! the idle wait below) then holds none of the guest's submissions, as Metal's present holds no
+//! queue of the guest's. A device with none to spare (RADV's and lavapipe's one graphics queue)
+//! gives it a `VkQueue` its other queues share, and the runtime announces it once
+//! (`shared-present-queue`, a performance kind, relayed).
 //!
-//! [`reims_vgpu_core::present`] owns the semantic stream: which frames are in
-//! flight, what parks when no image is free, and what the old swapchain is
-//! still owed. [`crate::frames`] owns the native slots and the binary
-//! semaphores that cannot be reused after a failure. Neither decides what the
-//! swapchain *is*, and that is one decision made once per surface generation
-//! out of five independent capability answers — so it lives here, where it can
-//! be made with no device and asserted with no window.
+//! **Making it.** Over a `VkSurfaceKHR` of the runtime's instance, which the swapchain owns from
+//! then on and destroys after its last image. The presenting queue's family must present to the
+//! surface, which must offer `B8G8R8A8_UNORM` in `SRGB_NONLINEAR`: the format the display draws
+//! into, which the compositor reads as sRGB. Otherwise there is no swapchain, and the window
+//! stays empty; the reason is logged.
 //!
-//! # An offered format is not a substitutable one
+//! **Present mode.** Never one that tears, and never one that makes the guest wait: MAILBOX
+//! where the surface offers it, with at least four images, so that taking an image rarely waits
+//! for the compositor to give one back; else FIFO, with at least three (MoltenVK offers FIFO
+//! alone beside IMMEDIATE, and makes the layer's drawables as many as the images). Either way a
+//! frame faster than the screen replaces or queues behind the one before: the window shows up to
+//! the screen's rate. FIFO_LATEST_READY (`VK_EXT_present_mode_fifo_latest_ready`) is not asked
+//! for: it would serve only a surface without MAILBOX, and every surface measured offers MAILBOX
+//! (an RTX 5080 Laptop GPU's NVIDIA driver under KWin), while its feature, like any the runtime
+//! enables for a listed extension, would be one more a device could be refused for.
 //!
-//! The composition writes the guest's scanout bytes. A surface that does not
-//! offer that exact format is refused by name rather than substituted, because
-//! every substitution available is wrong in a way nothing downstream can
-//! detect:
+//! **Pacing, on the render thread.** Each draw takes the next image with a fence, without waiting
+//! in the take (the presentation engine answers at once whether it has one to give), and waits
+//! for the fence, up to [`WAIT_NS`]: that is the render thread's wait for the compositor, as
+//! `nextDrawable` is on the Metal platform's window. Where no image is free, the draw is tried
+//! again. The frame's command buffer waits on no semaphore of the compositor's, so a frame the
+//! display counts as in flight completes when the GPU does, never when the compositor gives an
+//! image back: a window the compositor stops showing (a closed lid, a minimized window) slows its
+//! own render thread, never the guest's presents. A wait that runs out gives [`Acquired::Retry`]:
+//! the image stays taken, and the next draw waits for it again. Where the OS has an image's
+//! drawable to fetch (MoltenVK's `CAMetalDrawable`, [`crate::os::Drawables`]), the render thread
+//! fetches it once the image is taken, so any wait for one is its own, never the frame's
+//! submission's; where none comes, the draw is tried again likewise.
 //!
-//! - `B8G8R8A8_SRGB` for `B8G8R8A8_UNORM` applies the sRGB transfer function
-//!   when the image is written. The guest composited its frame already; writing
-//!   it through an sRGB view encodes it a second time, and the frame comes out
-//!   washed out with no error anywhere.
-//! - `R8G8B8A8_UNORM` for `B8G8R8A8_UNORM` is the same bits in a different
-//!   channel order, so red and blue swap.
+//! **Each frame.** The command buffer signals the image's own semaphore after the present pass
+//! ([`Swapchain::encode_ready`]); once the runtime has scheduled it, the image is presented on
+//! the presenting queue's `VkQueue`, waiting on that semaphore ([`Swapchain::present`]). An image
+//! taken for a
+//! frame the display then drew nothing into is kept for the next draw. An image's semaphore is
+//! signalled again only by a frame drawn into it after it was taken again, its fence waited for:
+//! by then its last present has waited on the semaphore (below).
 //!
-//! So [`Refusal::FormatNotOffered`] carries what the surface *did* offer, and
-//! the caller either composes into something the surface has or reports the
-//! mismatch. That is [`crate::vertex`]'s rule for a declined vertex format
-//! reached from the other side: there, a wider sibling is a real substitute and
-//! the plan records that it was used; here there is no sibling that preserves
-//! the picture, so there is nothing to record and the answer is no.
+//! **Size.** The swapchain is made at the size the window asks for, in pixels: Wayland gives a
+//! surface no size of its own and reports no out-of-date swapchain when the window's pixels
+//! change, so a draw at another size makes a new one. Where the surface has a size of its own
+//! (X11), the swapchain takes that one, and the window's size otherwise within the surface's
+//! limits ([`extent_for`]): during a resize the window's size can be a step behind the
+//! surface's. One the compositor reports out of date or suboptimal is made again at the next
+//! draw. Making a new one waits for the old one's frames to complete, then passes the old one as
+//! `oldSwapchain` and retires it (below). A swapchain the surface refuses for now (it has no
+//! pixels, as a minimized window's may) is tried again at the next draw; only a lost surface
+//! ends the swapchain's draws ([`Acquired::Failed`]).
 //!
-//! # One more image than the minimum, on purpose — and three under `MAILBOX`
+//! **Retiring one, with no wait on the queue.** A retired swapchain, its images' textures and
+//! their semaphores are destroyed once nothing uses them: its frames' command buffers have
+//! completed (waited for as it retires), and so has its last present, its wait on a semaphore
+//! included. Where the device has present fences (`swapchainMaintenance1`,
+//! [`crate::os::present_fences`]), each present signals a fence of its own once the presentation
+//! engine is done with its semaphore and image, which tells it exactly. Two rules of Vulkan's
+//! tell it too, with no fence ([`Presents`]): an image taken again, its fence waited for, has its
+//! previous present complete, the wait on its semaphore included (the Vulkan Guide's "Swapchain
+//! Semaphore Reuse"); and the presents made on one queue are performed in the order they were
+//! made (`vkQueuePresentKHR`), whatever the swapchain, and a present the compositor rejects as
+//! out of date or lost still waits on its semaphores. So once a present made after a swapchain's
+//! last is known complete, so is that one. Until then the retired swapchain is kept, up to
+//! [`RETIRED`] of them. Past that (a resize dragged out over many frames retires one a frame,
+//! faster than any present is known complete), and at the swapchain's end, where a present is not
+//! known complete, the swapchain waits for the presents' fences, up to [`END_WAIT_NS`]; where it
+//! has none, or they do not signal in that time, it waits for the presenting queue to idle, the
+//! only other way unextended Vulkan has, and one its specification does not cover either. That
+//! queue holds the window's presents alone where the device reserved it (above).
 //!
-//! With exactly `minImageCount` images, `vkAcquireNextImageKHR` may have to
-//! wait for the presentation engine to release one — and waiting on a host
-//! inside the path a frame takes is the thing this architecture does not do.
-//! One more gives the ring a free slot to acquire into while the engine still
-//! holds the last. `maxImageCount` of zero means unbounded, which is a real
-//! answer and not a missing one, so the clamp only applies where the surface
-//! named a maximum.
+//! **One window-system call at a time.** Every call any swapchain of the process makes into the
+//! window system (the surface's queries and its end, making and destroying swapchains, taking
+//! images and presenting) runs under one lock, [`WSI`]. Measured on an RTX 5080 Laptop GPU (NVIDIA
+//! 615.71.09, KWin on Wayland, two windows): `vkQueuePresentKHR` on one window's render thread
+//! crashed inside the driver while the other's made its swapchain, though Vulkan allows both at
+//! once. The lock is held for those calls alone, never while a draw waits for an image or a frame
+//! for the GPU, so no window waits on another for more than a call. A present takes it before the
+//! presenting queue's own lock, which the runtime's submissions take without it.
 //!
-//! `MAILBOX` needs a third: one image queued for display, one being drawn, and
-//! one for the queued image to be *replaced* with. That replacement is the
-//! whole reason to be on the rung — with two images the mode still works and
-//! degrades to waiting for the queued frame, which is the behaviour `FIFO`
-//! already had. So [`MAILBOX_MIN_IMAGES`] is a floor on that arm only, and the
-//! surface's own maximum still wins over it: a surface that caps at two cannot
-//! be argued with.
+//! **The commands.** `VK_KHR_swapchain`'s, and the OS's drawable fetch, are looked up as each
+//! swapchain is made ([`SwapchainFns`]), through the runtime's look-up
+//! (`rt::Device::device_proc_addr`), which first puts back the device's first word, the loader's
+//! dispatch table, that MoltenVK writes over whenever it names the device in a debug message.
+//! The commands themselves are the driver's, which read no word, but for `vkCreateSwapchainKHR`,
+//! the loader's terminator, which finds the device by that word: it is called with the word put
+//! back too (`rt::Device::with_loader_word`).
 //!
-//! The floor is also the depth a presenter can usefully run at, which is why it
-//! is public. A presenter with more presents in flight than the swapchain has
-//! images has slots that can never be filled.
-//!
-//! The count requested is still only a request: `vkGetSwapchainImagesKHR`
-//! reports what the driver actually made, and that number is the one
-//! [`reims_vgpu_core::present::PresentStream::configure`] is told. Nothing here
-//! is a bound on anything.
-//!
-//! # A surface with no area is not ready, and is not refused
-//!
-//! A minimized window reports a current extent of zero, and a swapchain of zero
-//! extent cannot be created. That is not a capability this device lacks and not
-//! a guest error: it resolves by itself when the window comes back. So it is
-//! [`NotReady`] and not a [`Refusal`] — a refusal is terminal and would leave
-//! the surface dead for the session.
-//!
-//! # Present mode is a two-rung ladder and the bottom rung is guaranteed
-//!
-//! `FIFO` is the one mode the specification requires every surface to support,
-//! so the ladder is total and there is no "no present mode" refusal.
-//! `MAILBOX` is the rung above it: same absence of tearing, lower latency,
-//! because a frame that arrives before the next vertical blank replaces the
-//! pending one instead of queueing behind it.
-//!
-//! `IMMEDIATE` is deliberately not on the ladder. It tears, and nothing in the
-//! guest's presentation contract asks for a torn frame — a mode that trades
-//! correctness for latency is not one an operator switch may reach, because
-//! [`reims_vgpu_config`] switches may only narrow what the device does. The switch
-//! here narrows to `FIFO`, which is the direction that is allowed.
+//! **What the runtime announces.** Each batch that uses an image moves it from
+//! `PRESENT_SRC_KHR`, its layout between batches, into `GENERAL` and back: two whole-image
+//! barriers per frame, which the runtime announces once as a degradation of its own.
 
-use ash::vk;
+use std::collections::VecDeque;
+use std::ffi::c_void;
+use std::sync::Arc;
+use std::time::Duration;
 
-/// What the surface answered, in the four questions a swapchain is chosen from.
-///
-/// Taken as a value rather than queried, for the reason
-/// [`crate::census::Reported`] is: this module asks no driver anything, so the
-/// whole choice is testable against surfaces that do not exist.
-#[derive(Clone, Debug)]
-pub struct Surface<'a> {
-    /// `vkGetPhysicalDeviceSurfaceSupportKHR` for the queue family this rail
-    /// presents on.
+use ash::{khr, vk};
+use metal2vulkan::metal::{PixelFormat, TextureUsage};
+use metal2vulkan_runtime as rt;
+use reims_vgpu_core::platform::Handle as _;
+use reims_vgpu_core::sync::Mutex;
+
+use crate::gpu::command::{VulkanCommandBuffer, VulkanCommandQueue};
+use crate::gpu::device::VulkanDevice;
+use crate::gpu::metal_space::Hold;
+use crate::gpu::resource::VulkanTexture;
+
+/// How long a draw waits for the compositor to give an image, in nanoseconds: about two frames
+/// at 60 Hz.
+pub const WAIT_NS: u64 = 33_000_000;
+
+/// How long a swapchain's end waits for an image the compositor has yet to give, in
+/// nanoseconds, before it leaves the fence behind rather than destroy it in use; and how long it
+/// waits for presents' fences before it waits for the queue to idle (the module doc).
+const END_WAIT_NS: u64 = 1_000_000_000;
+
+/// How many retired swapchains are kept for their last presents to be known complete before the
+/// queue is waited idle (the module doc): each keeps its images until it is destroyed.
+const RETIRED: usize = 4;
+
+/// The images a swapchain asks for at least, by present mode.
+const MAILBOX_IMAGES: u32 = 4;
+/// With FIFO.
+const FIFO_IMAGES: u32 = 3;
+
+/// The format the display draws into, and its colour space.
+const FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
+/// The colour space the compositor reads it in.
+const COLOR_SPACE: vk::ColorSpaceKHR = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+
+/// The lock every call into the window system runs under (the module doc).
+static WSI: Mutex<()> = Mutex::new(());
+
+/// `VK_KHR_swapchain`'s commands on a device, looked up as a swapchain is made, through the
+/// runtime's guarded look-up (`rt::Device::device_proc_addr`, the module doc).
+struct SwapchainFns {
+    /// The device, whose loader word `vkCreateSwapchainKHR` reads.
+    device: rt::Device,
+    /// Its handle.
+    handle: vk::Device,
+    /// The commands.
+    fp: khr::swapchain::DeviceFn,
+}
+
+impl SwapchainFns {
+    /// The commands on `device`: `None` where it has none, its options asking for no
+    /// `VK_KHR_swapchain` (`crate::os::add_window_extensions`).
+    fn load(device: &rt::Device) -> Option<SwapchainFns> {
+        device.device_proc_addr(c"vkCreateSwapchainKHR")?;
+        let fp = khr::swapchain::DeviceFn::load(|name| {
+            device
+                .device_proc_addr(name)
+                .map_or(std::ptr::null(), |f| f as *const c_void)
+        });
+        // SAFETY: the handle is the device's, read while it lives; the swapchain that calls the
+        // commands holds the device.
+        let handle = unsafe { device.raw() }.device.handle();
+        Some(SwapchainFns {
+            device: device.clone(),
+            handle,
+            fp,
+        })
+    }
+
+    /// `vkCreateSwapchainKHR`: the loader's terminator, which finds the device by its first word,
+    /// so the call is made with the runtime's word put back (`rt::Device::with_loader_word`).
     ///
-    /// Separate from every other answer here because it is the only one that
-    /// is about the *pairing* rather than about the surface: the other three
-    /// describe what the surface offers, and this says whether this device's
-    /// present queue can address it at all. `VK_KHR_swapchain` being
-    /// enumerated does not imply it --- a host whose display is driven by a
-    /// different adapter enumerates the extension and supports no family for
-    /// the window's surface --- and it cannot be answered by
-    /// [`crate::census::Census`], which is taken before any surface exists.
-    pub supported_by_present_family: bool,
-    pub capabilities: vk::SurfaceCapabilitiesKHR,
-    pub formats: &'a [vk::SurfaceFormatKHR],
-    pub present_modes: &'a [vk::PresentModeKHR],
-}
-
-/// What the composition needs from the swapchain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Wanted {
-    /// The format the composition writes. Not negotiable; see the module doc.
-    pub format: vk::Format,
-    /// The size to ask for where the surface lets the swapchain choose. Ignored
-    /// where the surface names a current extent, which it usually does.
-    pub extent: vk::Extent2D,
-    /// Whether the composition copies into the image rather than rendering to
-    /// it. A surface whose `supportedUsageFlags` lacks `TRANSFER_DST` refuses.
-    pub transfer_destination: bool,
-}
-
-/// How far up the present-mode ladder an operator switch allows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Narrowing {
-    /// `REIMS_VGPU_SWAPCHAIN_FIFO`: take the bottom rung whatever the surface
-    /// offers.
-    pub fifo_only: bool,
-}
-
-impl Narrowing {
-    /// Read the switch. See [`reims_vgpu_config`] for the narrow-never-widen rule.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self {
-            fifo_only: reims_vgpu_config::switch(reims_vgpu_config::SWAPCHAIN_FIFO)
-                == reims_vgpu_config::Switch::On,
-        }
-    }
-}
-
-/// Why the surface has nothing to build on yet.
-///
-/// Distinct from [`Refusal`] because it resolves without anything changing
-/// about the device or the guest: the window comes back, and the next attempt
-/// succeeds. A refusal here would leave the surface dead for the session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotReady {
-    /// The surface's current extent has a zero dimension. A minimized window.
-    NoArea { width: u32, height: u32 },
-}
-
-impl NotReady {
-    #[must_use]
-    pub const fn slug(self) -> &'static str {
-        match self {
-            Self::NoArea { .. } => "vk_swapchain_surface_has_no_area",
-        }
-    }
-}
-
-impl std::fmt::Display for NotReady {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::NoArea { width, height } => {
-                write!(f, "{} width={width} height={height}", self.slug())
-            }
-        }
-    }
-}
-
-/// Why this surface cannot carry this composition.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// The surface offers no format the composition can write. Carries what it
-    /// does offer, because the refusal is only actionable with that list.
-    FormatNotOffered {
-        wanted: vk::Format,
-        offered: Vec<vk::Format>,
-    },
-    /// The surface offers the format and not with a colour space this device
-    /// can write through. A separate arm from the one above: the same format
-    /// under a different colour space is a different picture, and folding them
-    /// together would report a format that is present as absent.
-    ColorSpaceNotOffered {
-        format: vk::Format,
-        offered: Vec<vk::ColorSpaceKHR>,
-    },
-    /// The composition copies into the image and the surface will not allow it.
-    NoTransferDestination { supported: vk::ImageUsageFlags },
-    /// Neither opaque nor inherited composite alpha. Every other mode blends
-    /// the frame against the desktop using an alpha channel the guest did not
-    /// author.
-    NoOpaqueComposite {
-        supported: vk::CompositeAlphaFlagsKHR,
-    },
-    /// The surface reported no formats at all.
-    NoFormats,
-    /// No queue family this rail presents on supports this surface.
+    /// # Safety
     ///
-    /// `VkSwapchainCreateInfoKHR`'s surface must be one the device supports as
-    /// determined by `vkGetPhysicalDeviceSurfaceSupportKHR`
-    /// (VUID-VkSwapchainCreateInfoKHR-surface-01270). A refusal rather than
-    /// [`NotReady`]: nothing about this pairing changes when the window comes
-    /// back.
-    NotSupportedByPresentFamily,
-}
-
-impl Refusal {
-    #[must_use]
-    pub const fn slug(&self) -> &'static str {
-        match self {
-            Self::FormatNotOffered { .. } => "vk_swapchain_format_not_offered",
-            Self::ColorSpaceNotOffered { .. } => "vk_swapchain_color_space_not_offered",
-            Self::NoTransferDestination { .. } => "vk_swapchain_no_transfer_destination",
-            Self::NoOpaqueComposite { .. } => "vk_swapchain_no_opaque_composite",
-            Self::NoFormats => "vk_swapchain_no_formats",
-            Self::NotSupportedByPresentFamily => "vk_swapchain_family_cannot_present",
-        }
-    }
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::FormatNotOffered { wanted, offered } => write!(
-                f,
-                "{} wanted={wanted:?} offered={}",
-                self.slug(),
-                offered.len()
-            ),
-            Self::ColorSpaceNotOffered { format, offered } => write!(
-                f,
-                "{} format={format:?} offered={}",
-                self.slug(),
-                offered.len()
-            ),
-            Self::NoTransferDestination { supported } => {
-                write!(f, "{} supported={supported:?}", self.slug())
-            }
-            Self::NoOpaqueComposite { supported } => {
-                write!(f, "{} supported={supported:?}", self.slug())
-            }
-            Self::NoFormats | Self::NotSupportedByPresentFamily => f.write_str(self.slug()),
-        }
-    }
-}
-
-/// What a surface answered, turned into a swapchain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Ready(Plan),
-    /// Try again later; nothing is wrong. See [`NotReady`].
-    NotReady(NotReady),
-}
-
-/// Everything a `VkSwapchainKHR` is created from.
-///
-/// Spelled out rather than held as the ash structure, which is not `Eq` — and
-/// a choice that cannot be compared is one whose ladder cannot be asserted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Plan {
-    pub format: vk::SurfaceFormatKHR,
-    pub present_mode: vk::PresentModeKHR,
-    pub extent: vk::Extent2D,
-    /// What was asked for. The count that governs anything is the one
-    /// `vkGetSwapchainImagesKHR` reports; see the module doc.
-    pub requested_images: u32,
-    pub usage: vk::ImageUsageFlags,
-    pub composite_alpha: vk::CompositeAlphaFlagsKHR,
-    pub transform: vk::SurfaceTransformFlagsKHR,
-    /// Whether the extent came from the surface or from [`Wanted`]. Carried
-    /// because a caller that sized its attachments from the request needs to
-    /// know the surface overrode it.
-    pub extent_from_surface: bool,
-}
-
-impl Plan {
-    /// The create info, for `surface`, replacing `old`.
-    ///
-    /// `old` is `vk::SwapchainKHR::null()` for the first swapchain of a
-    /// surface. Passing the previous one lets the driver reuse its resources —
-    /// and retires it: it may no longer acquire, and it may not be destroyed
-    /// until every present against it has completed, which is
-    /// [`reims_vgpu_core::present::PresentStream`]'s accounting and not this
-    /// module's.
-    pub fn create_info(
+    /// `info` is valid, over a live surface of the device's instance.
+    unsafe fn create_swapchain(
         &self,
-        surface: vk::SurfaceKHR,
-        old: vk::SwapchainKHR,
-    ) -> vk::SwapchainCreateInfoKHR<'static> {
-        vk::SwapchainCreateInfoKHR::default()
-            .surface(surface)
-            .min_image_count(self.requested_images)
-            .image_format(self.format.format)
-            .image_color_space(self.format.color_space)
-            .image_extent(self.extent)
-            // One. A swapchain image is a scanout, and the stereoscopic form
-            // this field reaches has no counterpart in the guest's contract.
-            .image_array_layers(1)
-            .image_usage(self.usage)
-            // The composition records on one queue, so there is no ownership
-            // to transfer and concurrent access would cost a mode switch for
-            // nothing.
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(self.transform)
-            .composite_alpha(self.composite_alpha)
-            .present_mode(self.present_mode)
-            // Pixels the compositor obscures may be discarded. The guest never
-            // reads a presented image back — a Store goes to its own texture,
-            // not to the drawable — so there is nothing that could observe one.
-            .clipped(true)
-            .old_swapchain(old)
+        info: &vk::SwapchainCreateInfoKHR<'_>,
+    ) -> Result<vk::SwapchainKHR, vk::Result> {
+        let mut swapchain = vk::SwapchainKHR::null();
+        let made = self.device.with_loader_word(|| {
+            // SAFETY: the caller's; the device is live while `self` is.
+            unsafe {
+                (self.fp.create_swapchain_khr)(self.handle, info, std::ptr::null(), &mut swapchain)
+            }
+        });
+        made.result_with_success(swapchain)
+    }
+
+    /// `vkDestroySwapchainKHR`.
+    ///
+    /// # Safety
+    ///
+    /// `swapchain` is the device's, and nothing uses it any more.
+    unsafe fn destroy_swapchain(&self, swapchain: vk::SwapchainKHR) {
+        // SAFETY: the caller's.
+        unsafe { (self.fp.destroy_swapchain_khr)(self.handle, swapchain, std::ptr::null()) };
+    }
+
+    /// `vkGetSwapchainImagesKHR`: every image of `swapchain`.
+    ///
+    /// # Safety
+    ///
+    /// `swapchain` is a live swapchain of the device.
+    unsafe fn get_swapchain_images(
+        &self,
+        swapchain: vk::SwapchainKHR,
+    ) -> Result<Vec<vk::Image>, vk::Result> {
+        let get = self.fp.get_swapchain_images_khr;
+        loop {
+            let mut count = 0_u32;
+            // SAFETY: the caller's; a count query writes no image.
+            unsafe { get(self.handle, swapchain, &mut count, std::ptr::null_mut()) }.result()?;
+            let mut images = vec![vk::Image::null(); usize::try_from(count).unwrap_or(0)];
+            // SAFETY: as above; `images` holds `count` images.
+            let read = unsafe { get(self.handle, swapchain, &mut count, images.as_mut_ptr()) };
+            if read != vk::Result::INCOMPLETE {
+                read.result()?;
+                images.truncate(usize::try_from(count).unwrap_or(0));
+                return Ok(images);
+            }
+        }
+    }
+
+    /// `vkAcquireNextImageKHR`: the image's index, and whether the swapchain is suboptimal.
+    ///
+    /// # Safety
+    ///
+    /// As `vkAcquireNextImageKHR`'s valid usage asks, of a live swapchain of the device.
+    unsafe fn acquire_next_image(
+        &self,
+        swapchain: vk::SwapchainKHR,
+        timeout: u64,
+        semaphore: vk::Semaphore,
+        fence: vk::Fence,
+    ) -> Result<(u32, bool), vk::Result> {
+        let mut index = 0_u32;
+        // SAFETY: the caller's.
+        let taken = unsafe {
+            (self.fp.acquire_next_image_khr)(
+                self.handle,
+                swapchain,
+                timeout,
+                semaphore,
+                fence,
+                &mut index,
+            )
+        };
+        match taken {
+            vk::Result::SUCCESS => Ok((index, false)),
+            vk::Result::SUBOPTIMAL_KHR => Ok((index, true)),
+            other => Err(other),
+        }
+    }
+
+    /// `vkQueuePresentKHR` on `queue`: whether the swapchains are suboptimal.
+    ///
+    /// # Safety
+    ///
+    /// As `vkQueuePresentKHR`'s valid usage asks, on a queue of the device.
+    unsafe fn queue_present(
+        &self,
+        queue: vk::Queue,
+        info: &vk::PresentInfoKHR<'_>,
+    ) -> Result<bool, vk::Result> {
+        // SAFETY: the caller's.
+        match unsafe { (self.fp.queue_present_khr)(queue, info) } {
+            vk::Result::SUCCESS => Ok(false),
+            vk::Result::SUBOPTIMAL_KHR => Ok(true),
+            other => Err(other),
+        }
     }
 }
 
-/// The extent the surface will accept.
-///
-/// A current extent whose width is `u32::MAX` is the surface saying the
-/// swapchain chooses; anything else must be matched exactly, and clamping a
-/// named current extent would produce a create info the driver refuses.
-fn extent(capabilities: &vk::SurfaceCapabilitiesKHR, wanted: vk::Extent2D) -> (vk::Extent2D, bool) {
-    let current = capabilities.current_extent;
-    if current.width != u32::MAX {
-        return (current, true);
-    }
-    let min = capabilities.min_image_extent;
-    let max = capabilities.max_image_extent;
-    (
-        vk::Extent2D {
-            width: wanted.width.clamp(min.width, max.width),
-            height: wanted.height.clamp(min.height, max.height),
-        },
-        false,
-    )
+/// What a draw takes.
+#[derive(Debug)]
+pub enum Acquired {
+    /// An image to draw into, ready.
+    Image(Frame),
+    /// No image yet: the compositor has not given one back in time, or the swapchain was made
+    /// again. The draw is tried again.
+    Retry,
+    /// No image, nor will there be: the surface is lost, or the device.
+    Failed,
 }
 
-/// One more than the minimum — three under `MAILBOX` — bounded by a maximum
-/// where the surface named one. See the module doc for both floors.
-fn image_count(capabilities: &vk::SurfaceCapabilitiesKHR, mode: vk::PresentModeKHR) -> u32 {
-    let mut wanted = capabilities.min_image_count.saturating_add(1);
-    if mode == vk::PresentModeKHR::MAILBOX {
-        wanted = wanted.max(MAILBOX_MIN_IMAGES);
+/// An image a draw took, until it is presented or kept for the next draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    /// Its index in the swapchain.
+    index: u32,
+}
+
+/// One image of the swapchain.
+struct Image {
+    /// The image.
+    raw: vk::Image,
+    /// The runtime's texture over it.
+    texture: VulkanTexture,
+    /// The semaphore its frame's command buffer signals, and its present waits on.
+    ready: vk::Semaphore,
+    /// The command buffer of its last frame, until the swapchain ends.
+    last: Option<VulkanCommandBuffer>,
+    /// Its last present's number ([`Presents`]), 0 before its first.
+    presented: u64,
+}
+
+/// A swapchain and its images.
+struct Chain {
+    /// The swapchain.
+    raw: vk::SwapchainKHR,
+    /// The size in pixels it was made for: the window's.
+    size: (u64, u64),
+    /// Its images' size in pixels, within the surface's limits ([`extent_for`]).
+    extent: (u64, u64),
+    /// Its images, by index.
+    images: Vec<Image>,
+}
+
+impl Chain {
+    /// The number of its last present, 0 where none was made.
+    fn last_present(&self) -> u64 {
+        self.images.iter().map(|i| i.presented).max().unwrap_or(0)
     }
-    // Zero means unbounded, which is an answer and not an absent one.
-    if capabilities.max_image_count == 0 {
-        wanted
+}
+
+/// The fences of a swapchain's presents, where the device has present fences (the module doc).
+#[derive(Debug, Default)]
+struct Fences {
+    /// Fences unsignalled, with no present pending on them.
+    free: Vec<vk::Fence>,
+    /// The fences of the presents not yet seen signalled, each with its present's number, in the
+    /// order the presents were made.
+    pending: VecDeque<(u64, vk::Fence)>,
+}
+
+impl Fences {
+    /// A fence for a present: a free one, else a new one; none where the device makes none, and
+    /// the present goes without.
+    fn take(&mut self, vk: &ash::Device) -> Option<vk::Fence> {
+        if let Some(fence) = self.free.pop() {
+            return Some(fence);
+        }
+        // SAFETY: a valid create info, on the runtime's live device.
+        match unsafe { vk.create_fence(&vk::FenceCreateInfo::default(), None) } {
+            Ok(fence) => Some(fence),
+            Err(e) => {
+                log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkCreateFence: {e}");
+                None
+            }
+        }
+    }
+
+    /// `fence` was chained into present number `number`, which answered `result`: pending where
+    /// the present's operations were enqueued (it was taken, or rejected as out of date or for a
+    /// lost surface, which still waits on its semaphores), else free again, as a present that
+    /// enqueues nothing leaves its fence as it was.
+    fn presented(&mut self, number: u64, fence: vk::Fence, result: Result<bool, vk::Result>) {
+        match result {
+            Ok(_)
+            | Err(
+                vk::Result::ERROR_OUT_OF_DATE_KHR
+                | vk::Result::ERROR_SURFACE_LOST_KHR
+                | vk::Result::ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
+            ) => self.pending.push_back((number, fence)),
+            Err(_) => self.free.push(fence),
+        }
+    }
+
+    /// Every fence, free or pending.
+    fn all(&self) -> impl Iterator<Item = vk::Fence> + '_ {
+        (self.free.iter().copied()).chain(self.pending.iter().map(|&(_, fence)| fence))
+    }
+}
+
+/// What a swapchain knows of its presents (the module doc): they are numbered from 1 in the order
+/// they are made, all on one queue, and the newest known complete, its semaphore wait included,
+/// tells that every one before it is too.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Presents {
+    /// The presents made.
+    made: u64,
+    /// The newest present known complete; 0 for none.
+    complete: u64,
+}
+
+impl Presents {
+    /// A present made: its number.
+    fn make(&mut self) -> u64 {
+        self.made += 1;
+        self.made
+    }
+
+    /// An image taken again, its fence waited for, whose last present was number `last` (0 for
+    /// none): that present is complete, and every one made before it.
+    fn taken_again(&mut self, last: u64) {
+        self.complete = self.complete.max(last);
+    }
+
+    /// Whether present number `last`, and so every one before it, is known complete.
+    fn done(&self, last: u64) -> bool {
+        last <= self.complete
+    }
+
+    /// Present number `number`'s fence signalled: it is complete, and every one made before it.
+    fn signalled(&mut self, number: u64) {
+        self.complete = self.complete.max(number);
+    }
+
+    /// The queue was waited idle: every present made is taken as complete (the module doc).
+    fn idle(&mut self) {
+        self.complete = self.made;
+    }
+}
+
+/// A window's swapchain (the module doc), on the render thread.
+pub struct Swapchain {
+    /// The presenting queue, whose `VkQueue` presents (the module doc).
+    present: rt::CommandQueue,
+    /// The queue's device, whose textures the images are.
+    device: VulkanDevice,
+    /// The runtime's logical device.
+    vk: ash::Device,
+    /// The physical device.
+    physical: vk::PhysicalDevice,
+    /// The queue families the runtime's images are shared among.
+    families: Vec<u32>,
+    /// `VK_KHR_surface`'s commands.
+    surface_api: khr::surface::Instance,
+    /// `VK_KHR_swapchain`'s commands.
+    swapchain_api: SwapchainFns,
+    /// The drawable fetch, where the OS and the driver have one ([`crate::os::Drawables`]).
+    drawables: Option<crate::os::Drawables>,
+    /// The surface, owned.
+    surface: vk::SurfaceKHR,
+    /// The present mode.
+    mode: vk::PresentModeKHR,
+    /// The fence each image is taken with.
+    fence: vk::Fence,
+    /// The swapchain, once made.
+    chain: Option<Chain>,
+    /// Swapchains retired, kept until nothing uses them (the module doc).
+    retired: Vec<Chain>,
+    /// The presents made, and the newest known complete.
+    presents: Presents,
+    /// The presents' fences, where the device has present fences.
+    fences: Option<Fences>,
+    /// The swapchain is out of date, or suboptimal: the next draw makes it again.
+    stale: bool,
+    /// An image taken whose fence has not signalled yet.
+    pending: Option<u32>,
+    /// An image taken and ready, kept for the next draw.
+    held: Option<u32>,
+    /// The surface is lost: no swapchain will be made of it.
+    lost: bool,
+    /// The last making of the swapchain was refused, which was logged: the next refusal is not.
+    refusing: bool,
+}
+
+impl std::fmt::Debug for Swapchain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Swapchain")
+            .field("mode", &self.mode.as_raw())
+            .field("size", &self.chain.as_ref().map(|c| c.size))
+            .field("stale", &self.stale)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a swapchain is not made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Has `report` called with `command_buffer`'s GPU time once it completes, on the runtime's
+/// completion thread: its GPU end less its GPU start, as the runtime answers them (on a device
+/// that times its command buffers from the host, from the end of its submission to the host's
+/// sight of its completion). Nothing is reported where the runtime gives no time, nor where it
+/// refuses the handler (a command buffer already committed): false then.
+pub fn report_gpu_time(
+    command_buffer: &VulkanCommandBuffer,
+    report: impl FnOnce(Duration) + Send + 'static,
+) -> bool {
+    command_buffer
+        .raw
+        .add_completed_handler(Box::new(move |cb: &rt::CommandBuffer| {
+            if let (Ok(start), Ok(end)) = (cb.gpu_start_time(), cb.gpu_end_time())
+                && let Ok(time) = Duration::try_from_secs_f64(end - start)
+            {
+                report(time);
+            }
+        }))
+        .is_ok()
+}
+
+/// A refusal naming `what` failed with `result`.
+fn refused(what: &str, result: vk::Result) -> Refused {
+    Refused(format!("{what}: {result}"))
+}
+
+/// The present mode of a swapchain over a surface offering `modes` (the module doc): MAILBOX
+/// where offered, else FIFO, which every surface offers.
+fn present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+    if modes.contains(&vk::PresentModeKHR::MAILBOX) {
+        vk::PresentModeKHR::MAILBOX
     } else {
-        wanted.min(capabilities.max_image_count)
+        vk::PresentModeKHR::FIFO
     }
 }
 
-/// The images `MAILBOX` needs to be `MAILBOX`: one queued, one being drawn, one
-/// to replace the queued one with. See the module doc.
-pub const MAILBOX_MIN_IMAGES: u32 = 3;
-
-/// The best present mode this surface offers, under `narrowing`.
-fn present_mode(offered: &[vk::PresentModeKHR], narrowing: Narrowing) -> vk::PresentModeKHR {
-    if !narrowing.fifo_only && offered.contains(&vk::PresentModeKHR::MAILBOX) {
-        return vk::PresentModeKHR::MAILBOX;
-    }
-    // Required of every surface by the specification, so the ladder is total
-    // and there is no arm below this one.
-    vk::PresentModeKHR::FIFO
-}
-
-/// Choose a swapchain for `wanted` on `surface`.
-///
-/// # Errors
-///
-/// [`Refusal`] for a surface that cannot carry this composition at all.
-/// A surface that merely has no area yet is [`Outcome::NotReady`] and not an
-/// error; see the module doc.
-pub fn plan(
-    surface: &Surface<'_>,
-    wanted: Wanted,
-    narrowing: Narrowing,
-) -> Result<Outcome, Refusal> {
-    // Before anything the surface offers is read, because none of it is a
-    // property of a pairing this device cannot make: a surface the present
-    // family does not support may still answer formats and present modes, and
-    // choosing among them would be planning a swapchain that
-    // `vkCreateSwapchainKHR` is not permitted to build.
-    if !surface.supported_by_present_family {
-        return Err(Refusal::NotSupportedByPresentFamily);
-    }
-    if surface.formats.is_empty() {
-        return Err(Refusal::NoFormats);
-    }
-    // The format first, because it is the one refusal a caller can act on by
-    // composing differently, and deciding it before the extent keeps a
-    // minimized window from hiding it until the window comes back.
-    let matching: Vec<vk::SurfaceFormatKHR> = surface
-        .formats
-        .iter()
-        .copied()
-        .filter(|offered| offered.format == wanted.format)
-        .collect();
-    if matching.is_empty() {
-        return Err(Refusal::FormatNotOffered {
-            wanted: wanted.format,
-            offered: surface.formats.iter().map(|f| f.format).collect(),
-        });
-    }
-    // The colour space the composition writes through. Two arms rather than
-    // one so a surface that offers the format under some other space reports
-    // the space and not the format — the two are fixed by different changes.
-    let Some(format) = matching
-        .iter()
-        .copied()
-        .find(|offered| offered.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-    else {
-        return Err(Refusal::ColorSpaceNotOffered {
-            format: wanted.format,
-            offered: matching.iter().map(|f| f.color_space).collect(),
-        });
+/// The size in pixels of the images of a swapchain for a window of `size` pixels on a surface
+/// of `caps`: the surface's own size where it has one, else `size` within the surface's limits.
+/// `None` where that has no pixel (a minimized window's surface may allow none).
+fn extent_for(size: (u64, u64), caps: &vk::SurfaceCapabilitiesKHR) -> Option<vk::Extent2D> {
+    let extent = if caps.current_extent.width == u32::MAX {
+        let within = |wanted: u64, min: u32, max: u32| {
+            u32::try_from(wanted)
+                .unwrap_or(u32::MAX)
+                .clamp(min, max.max(min))
+        };
+        vk::Extent2D {
+            width: within(
+                size.0,
+                caps.min_image_extent.width,
+                caps.max_image_extent.width,
+            ),
+            height: within(
+                size.1,
+                caps.min_image_extent.height,
+                caps.max_image_extent.height,
+            ),
+        }
+    } else {
+        caps.current_extent
     };
+    (extent.width > 0 && extent.height > 0).then_some(extent)
+}
 
-    let mut usage = vk::ImageUsageFlags::COLOR_ATTACHMENT;
-    if wanted.transfer_destination {
-        if !surface
-            .capabilities
-            .supported_usage_flags
-            .contains(vk::ImageUsageFlags::TRANSFER_DST)
+impl Swapchain {
+    /// A swapchain over `surface`, presented on a presenting queue of `queue`'s device, made at
+    /// the first draw. Refused, with the surface destroyed, where the device has no swapchain
+    /// commands ([`SwapchainFns`]), the runtime makes no presenting queue (a lost device), the
+    /// presenting queue's family does not present to the surface, or it offers no
+    /// `B8G8R8A8_UNORM` in `SRGB_NONLINEAR` (the module doc).
+    ///
+    /// # Safety
+    ///
+    /// `surface` is a live surface of the instance of `queue`'s device, owned by no one else.
+    pub unsafe fn new(
+        queue: &VulkanCommandQueue,
+        surface: vk::SurfaceKHR,
+    ) -> Result<Swapchain, Refused> {
+        let device = queue.device.clone_ref();
+        // SAFETY: the handles are the runtime's, used only while `device` lives, which the
+        // swapchain holds; nothing here destroys them.
+        let raw = unsafe { device.raw.raw() };
+        let surface_api = khr::surface::Instance::new(raw.entry, raw.instance);
+        let (vk, physical) = (raw.device.clone(), raw.physical_device);
+        let families = raw.queue_families.to_vec();
+        let Some(swapchain_api) = SwapchainFns::load(&device.raw) else {
+            let _wsi = WSI.lock();
+            // SAFETY: the surface is this call's, and nothing was made of it.
+            unsafe { surface_api.destroy_surface(surface, None) };
+            return Err(Refused(
+                "the device has no swapchain commands (no VK_KHR_swapchain)".to_owned(),
+            ));
+        };
+        let drawables = crate::os::Drawables::load(&device.raw);
+        let present = match device.raw.new_command_queue_for_presenting() {
+            Ok(present) => present,
+            Err(e) => {
+                let _wsi = WSI.lock();
+                // SAFETY: the surface is this call's, and nothing was made of it.
+                unsafe { surface_api.destroy_surface(surface, None) };
+                return Err(Refused(format!("no presenting queue: {e}")));
+            }
+        };
+        let wsi = WSI.lock();
+        let destroy = |reason: Refused| {
+            // SAFETY: the surface is this call's, and nothing was made of it.
+            unsafe { surface_api.destroy_surface(surface, None) };
+            reason
+        };
+        // SAFETY: the closure only reads the family; it submits nothing.
+        let family = unsafe { present.with_vk_queue(|_, family| family) };
+        // SAFETY: `surface` and `physical` are live, of one instance.
+        let presents =
+            unsafe { surface_api.get_physical_device_surface_support(physical, family, surface) }
+                .map_err(|e| destroy(refused("vkGetPhysicalDeviceSurfaceSupportKHR", e)))?;
+        if !presents {
+            return Err(destroy(Refused(format!(
+                "queue family {family} does not present to the window's surface"
+            ))));
+        }
+        // SAFETY: as above.
+        let formats = unsafe { surface_api.get_physical_device_surface_formats(physical, surface) }
+            .map_err(|e| destroy(refused("vkGetPhysicalDeviceSurfaceFormatsKHR", e)))?;
+        if !formats
+            .iter()
+            .any(|f| f.format == FORMAT && f.color_space == COLOR_SPACE)
         {
-            return Err(Refusal::NoTransferDestination {
-                supported: surface.capabilities.supported_usage_flags,
+            return Err(destroy(Refused(
+                "the window's surface offers no B8G8R8A8_UNORM in SRGB_NONLINEAR".to_owned(),
+            )));
+        }
+        // SAFETY: as above.
+        let modes =
+            unsafe { surface_api.get_physical_device_surface_present_modes(physical, surface) }
+                .map_err(|e| destroy(refused("vkGetPhysicalDeviceSurfacePresentModesKHR", e)))?;
+        let mode = present_mode(&modes);
+        // SAFETY: a valid create info, on the runtime's live device.
+        let fence = unsafe { vk.create_fence(&vk::FenceCreateInfo::default(), None) }
+            .map_err(|e| destroy(refused("vkCreateFence", e)))?;
+        drop(wsi);
+        let fences =
+            crate::os::present_fences(crate::platform::device_options()).then(Fences::default);
+        Ok(Swapchain {
+            present,
+            device,
+            vk,
+            physical,
+            families,
+            surface_api,
+            swapchain_api,
+            drawables,
+            surface,
+            mode,
+            fence,
+            chain: None,
+            retired: Vec::new(),
+            presents: Presents::default(),
+            fences,
+            stale: false,
+            pending: None,
+            held: None,
+            lost: false,
+            refusing: false,
+        })
+    }
+
+    /// A swapchain over the surface `make` makes on the instance of `queue`'s device, given the
+    /// instance's `vkGetInstanceProcAddr` (its loader's, which the runtime opened) and the
+    /// instance: [`Swapchain::new`] over it, or refused where `make` makes none.
+    ///
+    /// # Safety
+    ///
+    /// A surface `make` returns is one it made on the instance it was given, owned by no one
+    /// else.
+    pub unsafe fn over(
+        queue: &VulkanCommandQueue,
+        make: impl FnOnce(vk::PFN_vkGetInstanceProcAddr, vk::Instance) -> Option<vk::SurfaceKHR>,
+    ) -> Result<Swapchain, Refused> {
+        // SAFETY: the instance's handle and the loader's entry, read while the queue's device
+        // lives.
+        let raw = unsafe { queue.device.raw.raw() };
+        let (get_instance_proc_addr, instance) = (
+            raw.entry.static_fn().get_instance_proc_addr,
+            raw.instance.handle(),
+        );
+        let surface = {
+            let _wsi = WSI.lock();
+            make(get_instance_proc_addr, instance)
+        }
+        .ok_or_else(|| Refused("no surface".to_owned()))?;
+        // SAFETY: the caller's.
+        unsafe { Swapchain::new(queue, surface) }
+    }
+
+    /// Whether the swapchain presents with MAILBOX (else FIFO).
+    pub fn is_mailbox(&self) -> bool {
+        self.mode == vk::PresentModeKHR::MAILBOX
+    }
+
+    /// Whether each present signals a fence of its own (the module doc).
+    pub fn has_present_fences(&self) -> bool {
+        self.fences.is_some()
+    }
+
+    /// The size in pixels of the images, once the swapchain is made: the window's, or the
+    /// surface's own ([`extent_for`]).
+    pub fn extent(&self) -> Option<(u64, u64)> {
+        self.chain.as_ref().map(|c| c.extent)
+    }
+
+    /// The next image to draw a frame of `size` pixels into: the one kept from the last draw,
+    /// else the next the compositor has free, its fence waited for up to [`WAIT_NS`], else a
+    /// retry (the module doc). Makes the swapchain first where there is none, where it is stale,
+    /// or where its size is another.
+    pub fn acquire(&mut self, size: (u64, u64)) -> Acquired {
+        if size.0 == 0 || size.1 == 0 {
+            return Acquired::Retry;
+        }
+        let current = self.chain.as_ref().map(|c| c.size);
+        if self.stale || current != Some(size) {
+            match self.remake(size) {
+                Ok(()) => self.refusing = false,
+                Err(e) if self.lost => {
+                    log::warn!(
+                        target: "reims_vgpu_vulkan::swapchain",
+                        "no swapchain ({e}): the surface is lost"
+                    );
+                    return Acquired::Failed;
+                }
+                Err(e) => {
+                    if !self.refusing {
+                        log::warn!(
+                            target: "reims_vgpu_vulkan::swapchain",
+                            "no swapchain yet ({e}): tried again at the next draw"
+                        );
+                    }
+                    self.refusing = true;
+                    return Acquired::Retry;
+                }
+            }
+        }
+        if let Some(index) = self.held {
+            return self.fetched(index);
+        }
+        if let Some(index) = self.pending {
+            return self.wait_for(index);
+        }
+        let Some(chain) = &self.chain else {
+            return Acquired::Failed;
+        };
+        let taken = {
+            let _wsi = WSI.lock();
+            // SAFETY: the swapchain and fence are live, and the fence unsignalled with nothing
+            // pending on it. The take waits for nothing (the module doc).
+            unsafe {
+                self.swapchain_api.acquire_next_image(
+                    chain.raw,
+                    0,
+                    vk::Semaphore::null(),
+                    self.fence,
+                )
+            }
+        };
+        match taken {
+            Ok((index, suboptimal)) => {
+                self.stale |= suboptimal;
+                self.wait_for(index)
+            }
+            Err(vk::Result::TIMEOUT | vk::Result::NOT_READY) => Acquired::Retry,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                self.stale = true;
+                Acquired::Retry
+            }
+            Err(e) => {
+                log::warn!(
+                    target: "reims_vgpu_vulkan::swapchain",
+                    "vkAcquireNextImageKHR: {e}: the window stops presenting"
+                );
+                Acquired::Failed
+            }
+        }
+    }
+
+    /// Waits up to [`WAIT_NS`] for image `index`'s fence: the image, or a retry with it pending.
+    fn wait_for(&mut self, index: u32) -> Acquired {
+        // SAFETY: the fence is live, and image `index`'s acquire signals it.
+        match unsafe { self.vk.wait_for_fences(&[self.fence], true, WAIT_NS) } {
+            Ok(()) => {
+                // SAFETY: the fence has signalled, and nothing else waits on it.
+                if let Err(e) = unsafe { self.vk.reset_fences(&[self.fence]) } {
+                    log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkResetFences: {e}");
+                    return Acquired::Failed;
+                }
+                self.pending = None;
+                self.held = Some(index);
+                self.taken_again(index);
+                self.collect();
+                self.fetched(index)
+            }
+            Err(vk::Result::TIMEOUT) => {
+                self.pending = Some(index);
+                Acquired::Retry
+            }
+            Err(e) => {
+                log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkWaitForFences: {e}");
+                Acquired::Failed
+            }
+        }
+    }
+
+    /// Image `index`, taken and held, once its drawable is fetched where the OS has one to fetch
+    /// ([`crate::os::Drawables`], the module doc); a retry, the image still held, where none came
+    /// in time.
+    fn fetched(&self, index: u32) -> Acquired {
+        let image = self.chain.as_ref().and_then(|c| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| c.images.get(i))
+                .map(|i| i.raw)
+        });
+        let Some((drawables, image)) = self.drawables.as_ref().zip(image) else {
+            return Acquired::Image(Frame { index });
+        };
+        // SAFETY: the image is the swapchain's, taken, its fence waited for; only this thread
+        // uses it until its frame is committed.
+        if unsafe { drawables.fetch(image) } {
+            Acquired::Image(Frame { index })
+        } else {
+            Acquired::Retry
+        }
+    }
+
+    /// The texture over `frame`'s image, which the display's present pass draws into.
+    pub fn texture(&self, frame: Frame) -> Option<&VulkanTexture> {
+        let chain = self.chain.as_ref()?;
+        chain
+            .images
+            .get(usize::try_from(frame.index).ok()?)
+            .map(|i| &i.texture)
+    }
+
+    /// Encodes in `command_buffer` the signal of `frame`'s semaphore, after what it encoded:
+    /// false where the runtime refuses it.
+    pub fn encode_ready(&self, frame: Frame, command_buffer: &VulkanCommandBuffer) -> bool {
+        let Some(image) = self.image(frame) else {
+            return false;
+        };
+        // SAFETY: the semaphore is a binary semaphore of the command buffer's device, which
+        // lives until the swapchain's end, after every frame's completion; its present consumes
+        // the signal.
+        unsafe { command_buffer.raw.encode_signal_vk_semaphore(image.ready) }.is_ok()
+    }
+
+    /// Presents `frame`, whose command buffer `command_buffer` has been committed with its
+    /// [`Swapchain::encode_ready`]: once the runtime has scheduled it, on the presenting queue's
+    /// `VkQueue`, with a fence of its own where the device has present fences. A swapchain the
+    /// compositor reports out of date or suboptimal is made again at the next draw. Waits for
+    /// the scheduling alone.
+    pub fn present(&mut self, frame: Frame, command_buffer: VulkanCommandBuffer) {
+        self.held = None;
+        // The image's frame is waited for before its swapchain goes, presented or not.
+        if let Some(image) = self.chain.as_mut().and_then(|c| {
+            usize::try_from(frame.index)
+                .ok()
+                .and_then(|i| c.images.get_mut(i))
+        }) {
+            image.last = Some(command_buffer.clone_ref());
+        }
+        if let Err(e) = command_buffer.raw.wait_until_scheduled() {
+            // The image stays taken, its semaphore perhaps never signalled: the swapchain is
+            // made again, which gives every image back.
+            log::warn!(
+                target: "reims_vgpu_vulkan::swapchain",
+                "a window frame was not scheduled ({e:?}): the swapchain is made again"
+            );
+            self.stale = true;
+            return;
+        }
+        let Some(chain) = self.chain.as_mut() else {
+            return;
+        };
+        let Some(image) = usize::try_from(frame.index)
+            .ok()
+            .and_then(|i| chain.images.get_mut(i))
+        else {
+            return;
+        };
+        let waits = [image.ready];
+        let chains = [chain.raw];
+        let indices = [frame.index];
+        let fence = self.fences.as_mut().and_then(|f| f.take(&self.vk));
+        let fences = [fence.unwrap_or_default()];
+        let mut fenced = vk::SwapchainPresentFenceInfoEXT::default().fences(&fences);
+        let mut info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&waits)
+            .swapchains(&chains)
+            .image_indices(&indices);
+        if fence.is_some() {
+            info = info.push_next(&mut fenced);
+        }
+        let api = &self.swapchain_api;
+        let wsi = WSI.lock();
+        // SAFETY: the present is the only submission inside, on the presenting queue's own
+        // `VkQueue`; the image was taken from this swapchain and its semaphore's signal is
+        // submitted. A fence is chained only where the device enabled `swapchainMaintenance1`
+        // ([`crate::os::present_fences`]), and is unsignalled with nothing pending on it.
+        let presented = unsafe {
+            self.present
+                .with_vk_queue(|q, _| api.queue_present(q, &info))
+        };
+        drop(wsi);
+        image.last = Some(command_buffer);
+        // Numbered whatever the compositor answers: a present it rejects still waits on its
+        // semaphore (the module doc).
+        image.presented = self.presents.make();
+        if let (Some(fences), Some(fence)) = (self.fences.as_mut(), fence) {
+            fences.presented(image.presented, fence, presented);
+        }
+        match presented {
+            Ok(suboptimal) => self.stale |= suboptimal,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.stale = true,
+            Err(e) => {
+                log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkQueuePresentKHR: {e}");
+                self.stale = true;
+            }
+        }
+    }
+
+    /// `frame`'s image.
+    fn image(&self, frame: Frame) -> Option<&Image> {
+        let chain = self.chain.as_ref()?;
+        chain.images.get(usize::try_from(frame.index).ok()?)
+    }
+
+    /// Makes the swapchain again at `size` pixels, after the old one's frames (the module doc).
+    fn remake(&mut self, size: (u64, u64)) -> Result<(), Refused> {
+        let old = self.retire();
+        let made = self.make(
+            size,
+            old.as_ref().map_or(vk::SwapchainKHR::null(), |c| c.raw),
+        );
+        // Retired whether or not the new one was made.
+        self.retired.extend(old);
+        self.collect();
+        self.chain = Some(made?);
+        self.stale = false;
+        Ok(())
+    }
+
+    /// Takes the swapchain out once its frames have completed, waiting on nothing else; its
+    /// images' textures and semaphores stay until [`Swapchain::destroy`].
+    fn retire(&mut self) -> Option<Chain> {
+        let mut chain = self.chain.take()?;
+        for image in &mut chain.images {
+            if let Some(last) = image.last.take() {
+                // A frame that failed has completed too; what failed it is the display's.
+                let _ = last.raw.wait_until_completed();
+            }
+        }
+        if let Some(index) = self.settle_fence()
+            && let Some(image) = usize::try_from(index)
+                .ok()
+                .and_then(|i| chain.images.get(i))
+        {
+            self.presents.taken_again(image.presented);
+        }
+        self.held = None;
+        Some(chain)
+    }
+
+    /// Image `index` of the swapchain was taken again, its fence waited for: its last present is
+    /// complete ([`Presents::taken_again`]).
+    fn taken_again(&mut self, index: u32) {
+        let last = self.chain.as_ref().and_then(|c| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|i| c.images.get(i))
+                .map(|i| i.presented)
+        });
+        if let Some(last) = last {
+            self.presents.taken_again(last);
+        }
+    }
+
+    /// Destroys the retired swapchains whose last present is known complete; past [`RETIRED`]
+    /// kept, waits first for the oldest one's presents' fences, or where they do not tell it, for
+    /// the presenting queue to idle (the module doc).
+    fn collect(&mut self) {
+        self.poll_fences();
+        if self.retired.len() > RETIRED {
+            let oldest = self.retired.first().map_or(0, Chain::last_present);
+            if !self.wait_fences(oldest) {
+                self.wait_idle("more retired swapchains than are kept");
+            }
+        }
+        let (done, kept): (Vec<Chain>, Vec<Chain>) = std::mem::take(&mut self.retired)
+            .into_iter()
+            .partition(|c| self.presents.done(c.last_present()));
+        self.retired = kept;
+        if !done.is_empty() {
+            log::trace!(
+                target: "reims_vgpu_vulkan::swapchain",
+                "{} retired swapchain(s) destroyed, {} kept: presents complete up to {} of {}",
+                done.len(),
+                self.retired.len(),
+                self.presents.complete,
+                self.presents.made
+            );
+        }
+        for chain in done {
+            self.destroy(chain);
+        }
+    }
+
+    /// Waits for the presenting queue's `VkQueue` to idle (where the device shares it, other
+    /// queues' work on it included), after which every present made is taken as complete (the
+    /// module doc); `why` is logged.
+    fn wait_idle(&mut self, why: &str) {
+        log::debug!(
+            target: "reims_vgpu_vulkan::swapchain",
+            "waiting for the presenting queue to idle: {why}"
+        );
+        // SAFETY: the wait submits nothing; the queue is the swapchain's presenting queue.
+        let idle = unsafe {
+            self.present
+                .with_vk_queue(|q, _| self.vk.queue_wait_idle(q))
+        };
+        if let Err(e) = idle {
+            log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkQueueWaitIdle: {e}");
+        }
+        self.presents.idle();
+        // Every enqueued present's fence has signalled.
+        self.poll_fences();
+    }
+
+    /// Takes as complete the presents whose fences have signalled, the oldest first, as far as
+    /// the first that has not ([`Presents::signalled`]); each such fence is reset and free again.
+    fn poll_fences(&mut self) {
+        let Some(fences) = self.fences.as_mut() else {
+            return;
+        };
+        while let Some(&(number, fence)) = fences.pending.front() {
+            // SAFETY: the fence is live.
+            match unsafe { self.vk.get_fence_status(fence) } {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    log::warn!(target: "reims_vgpu_vulkan::swapchain", "vkGetFenceStatus: {e}");
+                    break;
+                }
+            }
+            fences.pending.pop_front();
+            // SAFETY: the fence has signalled, and nothing waits on it.
+            match unsafe { self.vk.reset_fences(&[fence]) } {
+                Ok(()) => fences.free.push(fence),
+                // SAFETY: as above.
+                Err(_) => unsafe { self.vk.destroy_fence(fence, None) },
+            }
+            self.presents.signalled(number);
+        }
+    }
+
+    /// Waits up to [`END_WAIT_NS`] for the fences of the presents up to number `last`, then
+    /// takes those that signalled as complete ([`Swapchain::poll_fences`]): whether present
+    /// `last`, and so every one before it, is known complete then. False where the device has no
+    /// present fences and it is not known.
+    fn wait_fences(&mut self, last: u64) -> bool {
+        let Some(fences) = &self.fences else {
+            return self.presents.done(last);
+        };
+        let waited: Vec<vk::Fence> = (fences.pending.iter())
+            .filter(|&&(number, _)| number <= last)
+            .map(|&(_, fence)| fence)
+            .collect();
+        if !waited.is_empty() {
+            // SAFETY: the fences are live, each chained into a present that was enqueued.
+            let _ = unsafe { self.vk.wait_for_fences(&waited, true, END_WAIT_NS) };
+        }
+        self.poll_fences();
+        self.presents.done(last)
+    }
+
+    /// Waits for an image still pending on the fence, up to [`END_WAIT_NS`], so the fence is
+    /// unsignalled with nothing pending on it; where the wait runs out, it is left behind and
+    /// another made. The image's index where its fence signalled: it was taken.
+    fn settle_fence(&mut self) -> Option<u32> {
+        let index = self.pending.take()?;
+        // SAFETY: the fence is live.
+        let waited = unsafe { self.vk.wait_for_fences(&[self.fence], true, END_WAIT_NS) };
+        // SAFETY: the fence has signalled, or is left behind unused.
+        let settled = waited.is_ok() && unsafe { self.vk.reset_fences(&[self.fence]) }.is_ok();
+        if !settled {
+            // SAFETY: a valid create info, on the runtime's live device.
+            if let Ok(fence) =
+                unsafe { self.vk.create_fence(&vk::FenceCreateInfo::default(), None) }
+            {
+                self.fence = fence;
+            }
+        }
+        waited.is_ok().then_some(index)
+    }
+
+    /// Destroys `chain`: its textures first, then its semaphores and the swapchain.
+    fn destroy(&self, chain: Chain) {
+        let _wsi = WSI.lock();
+        let Chain { raw, images, .. } = chain;
+        let semaphores: Vec<vk::Semaphore> = images.iter().map(|i| i.ready).collect();
+        drop(images);
+        // SAFETY: every frame of the swapchain has completed ([`Swapchain::retire`]), and so has
+        // its last present, its semaphore's wait included ([`Swapchain::collect`]): nothing uses
+        // its semaphores or images any more.
+        unsafe {
+            for semaphore in semaphores {
+                self.vk.destroy_semaphore(semaphore, None);
+            }
+            self.swapchain_api.destroy_swapchain(raw);
+        }
+    }
+
+    /// A swapchain for a window of `size` pixels, passing `old` as its `oldSwapchain`, its images
+    /// wrapped as runtime textures (the module doc). A refusal for a lost surface marks it lost.
+    fn make(&mut self, size: (u64, u64), old: vk::SwapchainKHR) -> Result<Chain, Refused> {
+        let _wsi = WSI.lock();
+        // SAFETY: the surface and physical device are live, of one instance.
+        let caps = unsafe {
+            self.surface_api
+                .get_physical_device_surface_capabilities(self.physical, self.surface)
+        }
+        .map_err(|e| self.refused_by("vkGetPhysicalDeviceSurfaceCapabilitiesKHR", e))?;
+        let extent = extent_for(size, &caps)
+            .ok_or_else(|| Refused("the window's surface has no pixels for now".to_owned()))?;
+        let wanted = if self.is_mailbox() {
+            MAILBOX_IMAGES
+        } else {
+            FIFO_IMAGES
+        };
+        let mut count = caps.min_image_count.saturating_add(1).max(wanted);
+        if caps.max_image_count != 0 {
+            count = count.min(caps.max_image_count);
+        }
+        let usage = caps.supported_usage_flags
+            & (vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED);
+        let alpha = if caps
+            .supported_composite_alpha
+            .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        {
+            vk::CompositeAlphaFlagsKHR::OPAQUE
+        } else {
+            vk::CompositeAlphaFlagsKHR::INHERIT
+        };
+        let concurrent = self.families.len() > 1;
+        let sharing = if concurrent {
+            vk::SharingMode::CONCURRENT
+        } else {
+            vk::SharingMode::EXCLUSIVE
+        };
+        let mut info = vk::SwapchainCreateInfoKHR::default()
+            .surface(self.surface)
+            .min_image_count(count)
+            .image_format(FORMAT)
+            .image_color_space(COLOR_SPACE)
+            .image_extent(extent)
+            .image_array_layers(1)
+            .image_usage(usage)
+            .image_sharing_mode(sharing)
+            .pre_transform(caps.current_transform)
+            .composite_alpha(alpha)
+            .present_mode(self.mode)
+            .clipped(true)
+            .old_swapchain(old);
+        if concurrent {
+            info = info.queue_family_indices(&self.families);
+        }
+        // SAFETY: a valid create info over the live surface; `old` is this swapchain's last.
+        let raw = unsafe { self.swapchain_api.create_swapchain(&info) }
+            .map_err(|e| self.refused_by("vkCreateSwapchainKHR", e))?;
+        let images = self.wrap(raw, extent, usage, sharing).inspect_err(|_| {
+            // SAFETY: nothing was presented from the new swapchain.
+            unsafe { self.swapchain_api.destroy_swapchain(raw) };
+        })?;
+        Ok(Chain {
+            raw,
+            size,
+            extent: (u64::from(extent.width), u64::from(extent.height)),
+            images,
+        })
+    }
+
+    /// `what`'s refusal with `result`, which marks the surface lost where it says so.
+    fn refused_by(&mut self, what: &str, result: vk::Result) -> Refused {
+        self.lost |= result == vk::Result::ERROR_SURFACE_LOST_KHR;
+        refused(what, result)
+    }
+
+    /// `swapchain`'s images, each wrapped as a runtime texture with a semaphore of its own.
+    fn wrap(
+        &self,
+        swapchain: vk::SwapchainKHR,
+        extent: vk::Extent2D,
+        usage: vk::ImageUsageFlags,
+        sharing: vk::SharingMode,
+    ) -> Result<Vec<Image>, Refused> {
+        // SAFETY: `swapchain` is live.
+        let raw_images = unsafe { self.swapchain_api.get_swapchain_images(swapchain) }
+            .map_err(|e| refused("vkGetSwapchainImagesKHR", e))?;
+        let mut info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(FORMAT)
+            .extent(vk::Extent3D {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .sharing_mode(sharing)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        if sharing == vk::SharingMode::CONCURRENT {
+            info = info.queue_family_indices(&self.families);
+        }
+        let mut descriptor = rt::TextureDescriptor::texture_2d(
+            PixelFormat::BGRA8Unorm,
+            u64::from(extent.width),
+            u64::from(extent.height),
+            false,
+        );
+        descriptor.usage = TextureUsage::RENDER_TARGET;
+        descriptor.resource_options = rt::ResourceOptions::private();
+        let layouts = rt::VkImageLayouts::new(
+            metal2vulkan::vk::ImageLayout::UNDEFINED,
+            metal2vulkan::vk::ImageLayout::PRESENT_SRC_KHR,
+        );
+        let mut images: Vec<Image> = Vec::with_capacity(raw_images.len());
+        let undo = |images: Vec<Image>, e: Refused| {
+            let semaphores: Vec<vk::Semaphore> = images.iter().map(|i| i.ready).collect();
+            drop(images);
+            for semaphore in semaphores {
+                // SAFETY: no frame used the semaphore.
+                unsafe { self.vk.destroy_semaphore(semaphore, None) };
+            }
+            e
+        };
+        for raw in raw_images {
+            // SAFETY: the image is the swapchain's, made with `info` (the swapchain's format,
+            // extent, usage and sharing, with one level, one layer and optimal tiling), bound,
+            // in UNDEFINED until its first frame, and it outlives the texture, which is dropped
+            // before the swapchain is destroyed ([`Swapchain::destroy`]).
+            let texture = match unsafe {
+                self.device
+                    .raw
+                    .new_texture_with_vk_image(&descriptor, raw, &info, layouts)
+            } {
+                Ok(texture) => texture,
+                Err(e) => {
+                    return Err(undo(
+                        images,
+                        Refused(format!("new_texture_with_vk_image: {e:?}")),
+                    ));
+                }
+            };
+            // SAFETY: a valid create info, on the runtime's live device.
+            let ready = match unsafe {
+                self.vk
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+            } {
+                Ok(ready) => ready,
+                Err(e) => return Err(undo(images, refused("vkCreateSemaphore", e))),
+            };
+            images.push(Image {
+                raw,
+                texture: self
+                    .device
+                    .texture_of(texture, None, 0, Arc::new(Hold::NONE)),
+                ready,
+                last: None,
+                presented: 0,
             });
         }
-        usage |= vk::ImageUsageFlags::TRANSFER_DST;
+        Ok(images)
     }
+}
 
-    let supported = surface.capabilities.supported_composite_alpha;
-    let composite_alpha = if supported.contains(vk::CompositeAlphaFlagsKHR::OPAQUE) {
-        vk::CompositeAlphaFlagsKHR::OPAQUE
-    } else if supported.contains(vk::CompositeAlphaFlagsKHR::INHERIT) {
-        // The window system decides, which for an opaque window is the same
-        // answer. Not preferred, because it is the window system's answer and
-        // not this device's.
-        vk::CompositeAlphaFlagsKHR::INHERIT
-    } else {
-        return Err(Refusal::NoOpaqueComposite { supported });
-    };
-
-    let (extent, extent_from_surface) = extent(&surface.capabilities, wanted.extent);
-    if extent.width == 0 || extent.height == 0 {
-        return Ok(Outcome::NotReady(NotReady::NoArea {
-            width: extent.width,
-            height: extent.height,
-        }));
+impl Drop for Swapchain {
+    /// The swapchain's end, on the render thread: its frames complete, and where a present is not
+    /// known complete, the swapchain waits for its presents' fences, or for the presenting queue
+    /// to idle (the module doc); then every swapchain's images' textures, its semaphores and the
+    /// swapchain go, then the fences and the surface.
+    fn drop(&mut self) {
+        let last = self.retire();
+        self.retired.extend(last);
+        // An image pending with no swapchain left: its fence is settled before it goes.
+        let _ = self.settle_fence();
+        let newest = self.retired.iter().map(Chain::last_present).max();
+        if let Some(newest) = newest
+            && !self.wait_fences(newest)
+        {
+            self.wait_idle("the window's end");
+        }
+        for chain in std::mem::take(&mut self.retired) {
+            self.destroy(chain);
+        }
+        let _wsi = WSI.lock();
+        // SAFETY: every present is complete, so nothing waits on a fence any more, nor uses the
+        // surface.
+        unsafe {
+            for fence in self.fences.iter().flat_map(Fences::all) {
+                self.vk.destroy_fence(fence, None);
+            }
+            self.vk.destroy_fence(self.fence, None);
+            self.surface_api.destroy_surface(self.surface, None);
+        }
     }
-
-    // The mode is chosen before the count because the count depends on it, and
-    // the two used to be computed apart: the mode was picked, the count derived
-    // from it, and then a literal `FIFO` handed to the create info — so a log
-    // read `present_mode=mailbox` beside a swapchain that was not, and the
-    // change that introduced the choice measured no effect because it never
-    // reached the driver. One value, decided once, in one structure.
-    let present_mode = present_mode(surface.present_modes, narrowing);
-    Ok(Outcome::Ready(Plan {
-        format,
-        present_mode,
-        extent,
-        requested_images: image_count(&surface.capabilities, present_mode),
-        usage,
-        composite_alpha,
-        // The surface's own transform, so the image is never rotated. Asking
-        // for identity on a surface that is rotated makes the compositor rotate
-        // the frame a second time or refuse the swapchain outright.
-        transform: surface.capabilities.current_transform,
-        extent_from_surface,
-    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ash::vk::Handle;
 
-    const BGRA: vk::Format = vk::Format::B8G8R8A8_UNORM;
-
-    fn srgb_space(format: vk::Format) -> vk::SurfaceFormatKHR {
-        vk::SurfaceFormatKHR {
-            format,
-            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-        }
-    }
-
-    /// A surface that answers everything the ordinary way.
-    fn capabilities() -> vk::SurfaceCapabilitiesKHR {
+    /// A surface's capabilities: its own size (`u32::MAX` wide where it has none) and its limits.
+    fn caps(current: (u32, u32), min: (u32, u32), max: (u32, u32)) -> vk::SurfaceCapabilitiesKHR {
+        let extent = |(width, height)| vk::Extent2D { width, height };
         vk::SurfaceCapabilitiesKHR {
-            min_image_count: 2,
-            max_image_count: 4,
-            current_extent: vk::Extent2D {
-                width: 1280,
-                height: 720,
-            },
-            min_image_extent: vk::Extent2D {
-                width: 1,
-                height: 1,
-            },
-            max_image_extent: vk::Extent2D {
-                width: 4096,
-                height: 4096,
-            },
-            max_image_array_layers: 1,
-            supported_transforms: vk::SurfaceTransformFlagsKHR::IDENTITY,
-            current_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
-            supported_composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
-            supported_usage_flags: vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::TRANSFER_DST,
+            current_extent: extent(current),
+            min_image_extent: extent(min),
+            max_image_extent: extent(max),
+            ..vk::SurfaceCapabilitiesKHR::default()
         }
     }
 
-    fn wanted() -> Wanted {
-        Wanted {
-            format: BGRA,
-            extent: vk::Extent2D {
-                width: 800,
-                height: 600,
-            },
-            transfer_destination: false,
-        }
+    /// The pixels of an extent, for comparing.
+    fn pixels(extent: Option<vk::Extent2D>) -> Option<(u32, u32)> {
+        extent.map(|e| (e.width, e.height))
     }
 
-    fn ready(
-        capabilities: vk::SurfaceCapabilitiesKHR,
-        formats: &[vk::SurfaceFormatKHR],
-        modes: &[vk::PresentModeKHR],
-        wanted: Wanted,
-        narrowing: Narrowing,
-    ) -> Plan {
-        let surface = Surface {
-            supported_by_present_family: true,
-            capabilities,
-            formats,
-            present_modes: modes,
-        };
-        match plan(&surface, wanted, narrowing).unwrap_or_else(|refusal| panic!("{refusal}")) {
-            Outcome::Ready(plan) => plan,
-            Outcome::NotReady(not_ready) => panic!("{not_ready}"),
-        }
-    }
-
-    fn refusal(
-        capabilities: vk::SurfaceCapabilitiesKHR,
-        formats: &[vk::SurfaceFormatKHR],
-        wanted: Wanted,
-    ) -> Refusal {
-        let surface = Surface {
-            supported_by_present_family: true,
-            capabilities,
-            formats,
-            present_modes: &[vk::PresentModeKHR::FIFO],
-        };
-        plan(&surface, wanted, Narrowing::default()).expect_err("refused")
-    }
-
-    /// A surface no present family supports is refused before anything it
-    /// offers is read.
-    ///
-    /// The regression: the pairing was never asked about. `VK_KHR_swapchain`
-    /// being enumerated says the entry points resolve, not that this device
-    /// can address this window --- on a host whose display is driven by a
-    /// different adapter it is enumerated and no family supports the surface
-    /// --- and the census cannot answer it, being taken before any surface
-    /// exists. So a perfectly ordinary-looking surface produced a plan and
-    /// `vkCreateSwapchainKHR` was handed a surface
-    /// VUID-VkSwapchainCreateInfoKHR-surface-01270 forbids.
+    /// MAILBOX where the surface offers it, else FIFO; never a mode that tears
     #[test]
-    fn a_surface_the_present_family_cannot_address_is_refused_before_it_is_read() {
-        // Everything else about this surface is as ordinary as it gets: the
-        // format, the colour space and the composite alpha all match, so the
-        // only thing left to refuse on is the pairing.
-        let surface = Surface {
-            supported_by_present_family: false,
-            capabilities: capabilities(),
-            formats: &[vk::SurfaceFormatKHR {
-                format: BGRA,
-                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            }],
-            present_modes: &[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX],
-        };
-        let refused = plan(&surface, wanted(), Narrowing::default()).expect_err("refused");
-        assert_eq!(refused, Refusal::NotSupportedByPresentFamily);
-        assert_eq!(refused.slug(), "vk_swapchain_family_cannot_present");
+    fn mailbox_is_taken_where_offered_else_fifo() {
+        use vk::PresentModeKHR as M;
+        assert!(present_mode(&[M::IMMEDIATE, M::FIFO, M::MAILBOX]) == M::MAILBOX);
+        assert!(present_mode(&[M::FIFO, M::FIFO_RELAXED, M::IMMEDIATE]) == M::FIFO);
+        assert!(present_mode(&[M::FIFO]) == M::FIFO);
+    }
 
-        // And it is not a not-ready: a minimized window comes back, an
-        // unsupported pairing does not. Checked with a zero extent, which is
-        // the one input that would otherwise produce `NotReady`.
-        let minimized = Surface {
-            capabilities: vk::SurfaceCapabilitiesKHR {
-                current_extent: vk::Extent2D {
-                    width: 0,
-                    height: 0,
-                },
-                ..capabilities()
-            },
-            ..surface
-        };
+    /// A present is known complete once an image presented at it or after it is taken again, and
+    /// with it every present before it; a swapchain whose last present is known complete goes
+    #[test]
+    fn a_present_is_known_complete_once_a_later_image_is_taken_again() {
+        let mut p = Presents::default();
+        assert!(p.done(0), "a swapchain that presented nothing goes at once");
+        let old_last = [p.make(), p.make(), p.make()][2];
+        let new_first = p.make();
+        assert!(!p.done(old_last));
+        p.taken_again(0);
+        assert!(!p.done(old_last), "an image never presented tells nothing");
+        p.taken_again(new_first);
+        assert!(p.done(old_last) && p.done(new_first));
+        p.taken_again(1);
+        assert!(
+            p.done(new_first),
+            "an older present taken again does not move it back"
+        );
+        let later = p.make();
+        assert!(!p.done(later));
+        p.idle();
+        assert!(p.done(later), "the queue waited idle");
+    }
+
+    /// A surface with a size of its own (X11's) gives the swapchain that size, whatever the
+    /// window's, which can be a step behind it during a resize
+    #[test]
+    fn a_surface_of_its_own_size_sizes_the_swapchain() {
+        let x11 = caps((800, 600), (800, 600), (800, 600));
+        assert_eq!(pixels(extent_for((1024, 768), &x11)), Some((800, 600)));
+        assert_eq!(pixels(extent_for((800, 600), &x11)), Some((800, 600)));
+    }
+
+    /// A surface with no size of its own (Wayland's) takes the window's, within its limits
+    #[test]
+    fn a_surface_without_a_size_takes_the_windows_within_its_limits() {
+        let wayland = caps((u32::MAX, u32::MAX), (1, 1), (16384, 16384));
+        assert_eq!(pixels(extent_for((1024, 768), &wayland)), Some((1024, 768)));
         assert_eq!(
-            plan(&minimized, wanted(), Narrowing::default()).expect_err("refused"),
-            Refusal::NotSupportedByPresentFamily
+            pixels(extent_for((20000, 768), &wayland)),
+            Some((16384, 768))
         );
-    }
-
-    #[test]
-    fn the_ordinary_surface_takes_the_top_rung_and_one_spare_image() {
-        let plan = ready(
-            capabilities(),
-            &[srgb_space(BGRA)],
-            &[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX],
-            wanted(),
-            Narrowing::default(),
-        );
-        assert_eq!(plan.format, srgb_space(BGRA));
-        assert_eq!(plan.present_mode, vk::PresentModeKHR::MAILBOX);
-        // One more than the minimum, so an acquire has somewhere to go while
-        // the presentation engine still holds the last image. Also the
-        // `MAILBOX` floor, which this surface reaches without it — see
-        // `only_the_mailbox_rung_asks_for_a_third_image` for the case that
-        // separates them.
-        assert_eq!(plan.requested_images, 3);
-        assert_eq!(plan.extent, capabilities().current_extent);
-        assert!(plan.extent_from_surface);
-        assert_eq!(plan.usage, vk::ImageUsageFlags::COLOR_ATTACHMENT);
-        assert_eq!(plan.composite_alpha, vk::CompositeAlphaFlagsKHR::OPAQUE);
-    }
-
-    /// The ladder is total: FIFO is required of every surface, so there is no
-    /// bottom to fall off. And the switch moves down it and never up.
-    #[test]
-    fn the_present_mode_ladder_has_no_bottom_and_the_switch_only_descends() {
-        let both = [vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX];
-        let fifo = [vk::PresentModeKHR::FIFO];
-        // Offered and wanted.
         assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &both,
-                wanted(),
-                Narrowing::default()
-            )
-            .present_mode,
-            vk::PresentModeKHR::MAILBOX
+            pixels(extent_for((u64::MAX, 1), &wayland)),
+            Some((16384, 1))
         );
-        // Offered and narrowed away.
-        assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &both,
-                wanted(),
-                Narrowing { fifo_only: true }
-            )
-            .present_mode,
-            vk::PresentModeKHR::FIFO
-        );
-        // Not offered, and the surface still gets a swapchain.
-        assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &fifo,
-                wanted(),
-                Narrowing::default()
-            )
-            .present_mode,
-            vk::PresentModeKHR::FIFO
-        );
-        // A surface that reported no modes at all is still served, because the
-        // one this falls back to is the one the specification guarantees.
-        assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &[],
-                wanted(),
-                Narrowing::default()
-            )
-            .present_mode,
-            vk::PresentModeKHR::FIFO
-        );
-        // Nothing reaches the tearing mode, whatever the surface offers.
-        for narrowing in [Narrowing::default(), Narrowing { fifo_only: true }] {
-            assert_ne!(
-                ready(
-                    capabilities(),
-                    &[srgb_space(BGRA)],
-                    &[
-                        vk::PresentModeKHR::IMMEDIATE,
-                        vk::PresentModeKHR::FIFO,
-                        vk::PresentModeKHR::MAILBOX,
-                    ],
-                    wanted(),
-                    narrowing
-                )
-                .present_mode,
-                vk::PresentModeKHR::IMMEDIATE
-            );
-        }
+        let small = caps((u32::MAX, u32::MAX), (64, 64), (4096, 4096));
+        assert_eq!(pixels(extent_for((10, 5000), &small)), Some((64, 4096)));
     }
 
-    /// The two near-misses are refused rather than taken. Both are offered
-    /// here, so the refusal is a decision and not an empty list.
+    /// Limits the wrong way round give the smallest the surface allows, not a panic
     #[test]
-    fn neither_the_srgb_sibling_nor_the_swapped_channels_is_a_substitute() {
-        let offered = [
-            srgb_space(vk::Format::B8G8R8A8_SRGB),
-            srgb_space(vk::Format::R8G8B8A8_UNORM),
-        ];
-        let Refusal::FormatNotOffered {
-            wanted: w,
-            offered: list,
-        } = refusal(capabilities(), &offered, wanted())
-        else {
-            panic!("the format refusal");
-        };
-        assert_eq!(w, BGRA);
-        assert_eq!(
-            list,
-            vec![vk::Format::B8G8R8A8_SRGB, vk::Format::R8G8B8A8_UNORM],
-            "the refusal has to say what is available or nobody can act on it"
-        );
-        // And adding the exact format to the same list makes it succeed, so
-        // the refusal was about the format and not about the list's length.
-        let with_exact = [offered[0], srgb_space(BGRA), offered[1]];
-        assert_eq!(
-            ready(
-                capabilities(),
-                &with_exact,
-                &[vk::PresentModeKHR::FIFO],
-                wanted(),
-                Narrowing::default()
-            )
-            .format,
-            srgb_space(BGRA)
-        );
+    fn crossed_limits_give_the_smallest() {
+        let crossed = caps((u32::MAX, u32::MAX), (100, 100), (50, 50));
+        assert_eq!(pixels(extent_for((10, 1000), &crossed)), Some((100, 100)));
     }
 
-    /// A format present under some other colour space reports the colour
-    /// space. The two are fixed by different changes, so folding them together
-    /// would send a caller looking for the wrong thing.
+    /// A surface with no pixels for now (a minimized window's may say 0×0) makes no swapchain:
+    /// the draw is tried again
     #[test]
-    fn a_format_under_the_wrong_colour_space_is_its_own_refusal() {
-        let offered = [vk::SurfaceFormatKHR {
-            format: BGRA,
-            color_space: vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT,
-        }];
-        let Refusal::ColorSpaceNotOffered {
-            format,
-            offered: spaces,
-        } = refusal(capabilities(), &offered, wanted())
-        else {
-            panic!("the colour-space refusal");
-        };
-        assert_eq!(format, BGRA);
-        assert_eq!(spaces, vec![vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT]);
-    }
-
-    #[test]
-    fn a_surface_with_no_formats_is_refused_by_name() {
-        assert_eq!(refusal(capabilities(), &[], wanted()), Refusal::NoFormats);
-    }
-
-    /// A minimized window is not ready and is not refused. A refusal is
-    /// terminal and would leave the surface dead for the session.
-    #[test]
-    fn a_minimized_window_is_not_ready_rather_than_refused() {
-        let capabilities = vk::SurfaceCapabilitiesKHR {
-            current_extent: vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
-            ..capabilities()
-        };
-        let surface = Surface {
-            supported_by_present_family: true,
-            capabilities,
-            formats: &[srgb_space(BGRA)],
-            present_modes: &[vk::PresentModeKHR::FIFO],
-        };
-        assert_eq!(
-            plan(&surface, wanted(), Narrowing::default()),
-            Ok(Outcome::NotReady(NotReady::NoArea {
-                width: 0,
-                height: 0
-            }))
-        );
-        // One zero dimension is enough.
-        let one_zero = vk::SurfaceCapabilitiesKHR {
-            current_extent: vk::Extent2D {
-                width: 1280,
-                height: 0,
-            },
-            ..capabilities
-        };
-        assert!(matches!(
-            plan(
-                &Surface {
-                    supported_by_present_family: true,
-                    capabilities: one_zero,
-                    ..surface.clone()
-                },
-                wanted(),
-                Narrowing::default()
-            ),
-            Ok(Outcome::NotReady(_))
-        ));
-    }
-
-    /// The format is decided before the extent, so a minimized window does not
-    /// hide a refusal that will still be there when it comes back.
-    #[test]
-    fn a_minimized_window_does_not_hide_a_format_refusal() {
-        let capabilities = vk::SurfaceCapabilitiesKHR {
-            current_extent: vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
-            ..capabilities()
-        };
-        assert!(matches!(
-            refusal(
-                capabilities,
-                &[srgb_space(vk::Format::R8G8B8A8_UNORM)],
-                wanted()
-            ),
-            Refusal::FormatNotOffered { .. }
-        ));
-    }
-
-    /// A named current extent is used exactly. Substituting the requested one
-    /// produces a create info the driver refuses.
-    #[test]
-    fn a_named_current_extent_wins_over_the_request() {
-        let plan = ready(
-            capabilities(),
-            &[srgb_space(BGRA)],
-            &[vk::PresentModeKHR::FIFO],
-            wanted(),
-            Narrowing::default(),
-        );
-        assert_eq!(plan.extent.width, 1280);
-        assert_ne!(plan.extent.width, wanted().extent.width);
-        assert!(plan.extent_from_surface);
-    }
-
-    /// The deferred extent is the request, clamped into what the surface will
-    /// take — and the caller is told the size is its own.
-    #[test]
-    fn a_deferred_extent_takes_the_request_and_clamps_it() {
-        let deferred = vk::SurfaceCapabilitiesKHR {
-            current_extent: vk::Extent2D {
-                width: u32::MAX,
-                height: u32::MAX,
-            },
-            min_image_extent: vk::Extent2D {
-                width: 640,
-                height: 480,
-            },
-            max_image_extent: vk::Extent2D {
-                width: 1024,
-                height: 1024,
-            },
-            ..capabilities()
-        };
-        let go = |width, height| {
-            ready(
-                deferred,
-                &[srgb_space(BGRA)],
-                &[vk::PresentModeKHR::FIFO],
-                Wanted {
-                    extent: vk::Extent2D { width, height },
-                    ..wanted()
-                },
-                Narrowing::default(),
-            )
-        };
-        // Within bounds, unchanged.
-        let inside = go(800, 600);
-        assert_eq!(
-            inside.extent,
-            vk::Extent2D {
-                width: 800,
-                height: 600
-            }
-        );
-        assert!(!inside.extent_from_surface);
-        // Below and above, on each axis independently.
-        assert_eq!(
-            go(1, 4096).extent,
-            vk::Extent2D {
-                width: 640,
-                height: 1024
-            }
-        );
-    }
-
-    /// One more than the minimum, and the maximum is a bound only where the
-    /// surface named one. Zero means unbounded, which is an answer.
-    #[test]
-    fn the_image_count_is_one_spare_bounded_only_by_a_named_maximum() {
-        let count = |min, max| {
-            ready(
-                vk::SurfaceCapabilitiesKHR {
-                    min_image_count: min,
-                    max_image_count: max,
-                    ..capabilities()
-                },
-                &[srgb_space(BGRA)],
-                &[vk::PresentModeKHR::FIFO],
-                wanted(),
-                Narrowing::default(),
-            )
-            .requested_images
-        };
-        assert_eq!(count(2, 4), 3);
-        // The spare would exceed the maximum, so it is given up rather than
-        // requested and refused.
-        assert_eq!(count(2, 2), 2);
-        assert_eq!(count(3, 3), 3);
-        // Unbounded.
-        assert_eq!(count(2, 0), 3);
-        assert_eq!(count(8, 0), 9);
-        // A driver reporting the largest possible minimum does not wrap.
-        assert_eq!(count(u32::MAX, 0), u32::MAX);
-    }
-
-    /// `MAILBOX` asks for a third image, and only `MAILBOX` does.
-    ///
-    /// The mode's whole advantage is replacing the queued frame rather than
-    /// queueing behind it, and with two images there is nothing to replace it
-    /// with — the rung is taken and its behaviour is `FIFO`'s. So the floor is
-    /// on that arm alone, which is the half a single fixture cannot show: a
-    /// floor applied to both modes and a floor applied to neither both pass a
-    /// test that only ever asks one of them.
-    #[test]
-    fn only_the_mailbox_rung_asks_for_a_third_image() {
-        let count = |min, max, offered: &[vk::PresentModeKHR]| {
-            ready(
-                vk::SurfaceCapabilitiesKHR {
-                    min_image_count: min,
-                    max_image_count: max,
-                    ..capabilities()
-                },
-                &[srgb_space(BGRA)],
-                offered,
-                wanted(),
-                Narrowing::default(),
-            )
-            .requested_images
-        };
-        let fifo: &[vk::PresentModeKHR] = &[vk::PresentModeKHR::FIFO];
-        let mailbox: &[vk::PresentModeKHR] =
-            &[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX];
-
-        // One spare would be two; the rung asks for the third.
-        assert_eq!(count(1, 0, fifo), 2);
-        assert_eq!(count(1, 0, mailbox), MAILBOX_MIN_IMAGES);
-        // Above the floor the ordinary rule governs both.
-        assert_eq!(count(4, 0, fifo), 5);
-        assert_eq!(count(4, 0, mailbox), 5);
-        // A surface that caps at two cannot be argued with, on either rung.
-        assert_eq!(count(1, 2, mailbox), 2);
-        // And the switch down to FIFO takes the floor away with the rung.
-        assert_eq!(
-            ready(
-                vk::SurfaceCapabilitiesKHR {
-                    min_image_count: 1,
-                    max_image_count: 0,
-                    ..capabilities()
-                },
-                &[srgb_space(BGRA)],
-                mailbox,
-                wanted(),
-                Narrowing { fifo_only: true },
-            )
-            .requested_images,
-            2
-        );
-    }
-
-    /// Transfer destination is asked for only when the composition copies, and
-    /// refused rather than dropped when the surface will not allow it.
-    #[test]
-    fn the_transfer_usage_is_requested_only_when_it_is_needed_and_refused_when_absent() {
-        let copying = Wanted {
-            transfer_destination: true,
-            ..wanted()
-        };
-        assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &[vk::PresentModeKHR::FIFO],
-                copying,
-                Narrowing::default()
-            )
-            .usage,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST
-        );
-        // Available and not asked for is not requested: a usage flag narrows
-        // what the driver may choose for the image.
-        assert_eq!(
-            ready(
-                capabilities(),
-                &[srgb_space(BGRA)],
-                &[vk::PresentModeKHR::FIFO],
-                wanted(),
-                Narrowing::default()
-            )
-            .usage,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-        );
-        // Asked for and unavailable refuses by name rather than silently
-        // dropping the flag and failing at the copy.
-        let no_transfer = vk::SurfaceCapabilitiesKHR {
-            supported_usage_flags: vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            ..capabilities()
-        };
-        assert_eq!(
-            refusal(no_transfer, &[srgb_space(BGRA)], copying),
-            Refusal::NoTransferDestination {
-                supported: vk::ImageUsageFlags::COLOR_ATTACHMENT
-            }
-        );
-        // And a composition that does not copy runs on the same surface.
-        assert!(matches!(
-            plan(
-                &Surface {
-                    supported_by_present_family: true,
-                    capabilities: no_transfer,
-                    formats: &[srgb_space(BGRA)],
-                    present_modes: &[vk::PresentModeKHR::FIFO],
-                },
-                wanted(),
-                Narrowing::default()
-            ),
-            Ok(Outcome::Ready(_))
-        ));
-    }
-
-    /// Opaque, then inherited, then nothing. Every other mode blends the frame
-    /// against the desktop using an alpha channel the guest did not author.
-    #[test]
-    fn the_composite_alpha_ladder_prefers_opaque_and_refuses_the_blending_modes() {
-        let with = |supported| {
-            let capabilities = vk::SurfaceCapabilitiesKHR {
-                supported_composite_alpha: supported,
-                ..capabilities()
-            };
-            let surface = Surface {
-                supported_by_present_family: true,
-                capabilities,
-                formats: &[srgb_space(BGRA)],
-                present_modes: &[vk::PresentModeKHR::FIFO],
-            };
-            plan(&surface, wanted(), Narrowing::default())
-        };
-        use vk::CompositeAlphaFlagsKHR as A;
-        for supported in [
-            A::OPAQUE,
-            A::OPAQUE | A::INHERIT,
-            A::OPAQUE | A::PRE_MULTIPLIED,
-        ] {
-            let Ok(Outcome::Ready(plan)) = with(supported) else {
-                panic!("{supported:?}");
-            };
-            assert_eq!(plan.composite_alpha, A::OPAQUE);
-        }
-        let Ok(Outcome::Ready(plan)) = with(A::INHERIT | A::POST_MULTIPLIED) else {
-            panic!("inherit is the fallback");
-        };
-        assert_eq!(plan.composite_alpha, A::INHERIT);
-        for supported in [A::PRE_MULTIPLIED, A::POST_MULTIPLIED, A::empty()] {
-            assert_eq!(
-                with(supported),
-                Err(Refusal::NoOpaqueComposite { supported }),
-                "{supported:?}"
-            );
-        }
-    }
-
-    /// The surface's own transform, not identity. Asking for identity on a
-    /// rotated surface makes the compositor rotate the frame a second time or
-    /// refuse the swapchain.
-    #[test]
-    fn the_transform_is_the_surfaces_current_one() {
-        for current in [
-            vk::SurfaceTransformFlagsKHR::IDENTITY,
-            vk::SurfaceTransformFlagsKHR::ROTATE_90,
-            vk::SurfaceTransformFlagsKHR::ROTATE_180,
-        ] {
-            let plan = ready(
-                vk::SurfaceCapabilitiesKHR {
-                    current_transform: current,
-                    supported_transforms: vk::SurfaceTransformFlagsKHR::IDENTITY
-                        | vk::SurfaceTransformFlagsKHR::ROTATE_90
-                        | vk::SurfaceTransformFlagsKHR::ROTATE_180,
-                    ..capabilities()
-                },
-                &[srgb_space(BGRA)],
-                &[vk::PresentModeKHR::FIFO],
-                wanted(),
-                Narrowing::default(),
-            );
-            assert_eq!(plan.transform, current);
-        }
-    }
-
-    /// The create info is the plan, and the old swapchain passes through it.
-    #[test]
-    fn the_create_info_is_the_plan_and_carries_the_swapchain_it_replaces() {
-        let plan = ready(
-            capabilities(),
-            &[srgb_space(BGRA)],
-            &[vk::PresentModeKHR::FIFO, vk::PresentModeKHR::MAILBOX],
-            Wanted {
-                transfer_destination: true,
-                ..wanted()
-            },
-            Narrowing::default(),
-        );
-        let surface = vk::SurfaceKHR::from_raw(7);
-        let old = vk::SwapchainKHR::from_raw(9);
-        let info = plan.create_info(surface, old);
-        assert_eq!(info.surface, surface);
-        assert_eq!(info.old_swapchain, old);
-        assert_eq!(info.min_image_count, plan.requested_images);
-        assert_eq!(info.image_format, BGRA);
-        assert_eq!(info.image_color_space, vk::ColorSpaceKHR::SRGB_NONLINEAR);
-        assert_eq!(info.image_extent, plan.extent);
-        assert_eq!(info.image_usage, plan.usage);
-        assert_eq!(info.present_mode, vk::PresentModeKHR::MAILBOX);
-        assert_eq!(info.pre_transform, plan.transform);
-        assert_eq!(info.composite_alpha, plan.composite_alpha);
-        // A scanout is one layer, recorded on one queue, and never read back.
-        assert_eq!(info.image_array_layers, 1);
-        assert_eq!(info.image_sharing_mode, vk::SharingMode::EXCLUSIVE);
-        assert_eq!(info.clipped, vk::TRUE);
-
-        // The first swapchain of a surface replaces nothing.
-        assert_eq!(
-            plan.create_info(surface, vk::SwapchainKHR::null())
-                .old_swapchain,
-            vk::SwapchainKHR::null()
-        );
-    }
-
-    /// Every refusal and every not-ready names itself, and no two share a
-    /// slug — the failure channel is read by grep.
-    #[test]
-    fn every_reason_names_itself_distinctly() {
-        let refusals = [
-            Refusal::FormatNotOffered {
-                wanted: BGRA,
-                offered: Vec::new(),
-            },
-            Refusal::ColorSpaceNotOffered {
-                format: BGRA,
-                offered: Vec::new(),
-            },
-            Refusal::NoTransferDestination {
-                supported: vk::ImageUsageFlags::empty(),
-            },
-            Refusal::NoOpaqueComposite {
-                supported: vk::CompositeAlphaFlagsKHR::empty(),
-            },
-            Refusal::NoFormats,
-        ];
-        let mut slugs = std::collections::BTreeSet::new();
-        for refusal in &refusals {
-            assert!(slugs.insert(refusal.slug()), "{}", refusal.slug());
-            assert!(refusal.to_string().starts_with(refusal.slug()));
-        }
-        let not_ready = NotReady::NoArea {
-            width: 0,
-            height: 0,
-        };
-        assert!(slugs.insert(not_ready.slug()));
-        assert!(not_ready.to_string().starts_with(not_ready.slug()));
-        assert_eq!(slugs.len(), 6);
+    fn a_surface_without_pixels_makes_no_swapchain() {
+        let minimized = caps((0, 0), (0, 0), (0, 0));
+        assert_eq!(pixels(extent_for((1024, 768), &minimized)), None);
+        let flat = caps((u32::MAX, u32::MAX), (0, 0), (0, 4096));
+        assert_eq!(pixels(extent_for((1024, 768), &flat)), None);
     }
 }

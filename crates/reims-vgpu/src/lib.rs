@@ -1,135 +1,86 @@
-//! Reims vGPU host path — single crate.
+//! The library's Rust API (docs/api.md section 3): owned Rust types over core, which the C API
+//! (`reims-vgpu-c`) wraps one to one.
 //!
-//! | Module | Role |
-//! | --- | --- |
-//! | [`protocol`] | Stable facts: formats, layouts, pure arithmetic |
-//! | [`model`] | Live guest-visible state (regs, rings, objects, present) |
-//! | [`runtime`] | Drain / parse / resolve / plan / HostActions |
-//! | [`backend`] | Trait + self-contained [`backend::metal`] / [`backend::vulkan`] |
-//! | [`qemu`] | QEMU C ABI surface only |
+//! Each object is made from one config ([`DeviceConfig`], [`DisplayConfig`],
+//! [`IoSurfaceDeviceConfig`]) holding closures for its callbacks, and answers a [`Result`] with
+//! the check that refused it ([`Error`]). [`Device`], [`Display`], [`FrameTarget`] and
+//! [`IoSurfaceDevice`] are counted references with `clone_ref()` and no `Clone`: the last drop
+//! of a device, display or IOSurface device is its end, run on the releasing thread. They are
+//! generic over the platform with [`DefaultPlatform`] as the default, so their forwarding is
+//! unit-tested on core's fake platform. The `vulkan` feature adds `VulkanPlatform`, over
+//! metal2vulkan's runtime, whose window displays on macOS have Metal copy each frame the runtime
+//! draws into their window.
 //!
-//! Features: at least one of `backend-metal` (default) or `backend-vulkan`, and
-//! a build may carry **both**. Vulkan's product path is self-contained `ash`
-//! ([`backend::vulkan::engine`]).
+//! **By OS.** On macOS the default platform is `MetalPlatform`, the product. On Linux the library
+//! is the Vulkan platform's: it builds only with the `vulkan` feature, and `VulkanPlatform` is the
+//! default.
 //!
-//! # The supported arms
+//! Behaviour is core's; this crate adds none. Its closures are called synchronously on the
+//! thread core calls them on, in core's order, which is the order of VM-memory operations and
+//! releases the host saw before. What it adds is where callbacks run: a display's on the
+//! process's display thread ([`platform`]), in place of the host's dispatch queue; and a
+//! display's own window, for a display created with one ([`DisplayConfig::window`]), which has
+//! every display callback as the guest reads them (`window.rs`).
 //!
-//! | Arm | Features | Host GPU API |
-//! | --- | --- | --- |
-//! | Metal | `backend-metal` | native Metal |
-//! | Vulkan / MoltenVK | `backend-vulkan` on macOS | MoltenVK |
-//! | Vulkan / native | `backend-vulkan` on linux | native ICD |
-//! | Both | `backend-metal,backend-vulkan` on macOS | either, chosen at run time |
-//!
-//! **Gate the host on `target_os` and nothing else.** `macos` and `linux` are
-//! the only two values this crate names, so a reader greps one key to find
-//! every host gate.
-//!
-//! There is **no** host-stub Metal arm. `backend-metal` off macOS has no Metal
-//! to call, so it is a compile error rather than a binary that links and cannot
-//! draw.
-//!
-//! # Why the fourth cell exists
-//!
-//! An Apple host can reach its GPU natively through Metal or through MoltenVK,
-//! and those two paths translate the guest's command stream by completely
-//! different means. When a frame is wrong, "is this a metal2vulkan defect or a
-//! defect in this device" is the first question and it was previously
-//! unanswerable without rebuilding — which changes the binary, the caches and
-//! the boot. A binary carrying both rails answers it by running the *same guest
-//! stream* twice with one variable changed.
-//!
-//! # What that costs the rest of the crate
-//!
-//! `cfg` may only ever answer **"what did this build compile"**. It may not
-//! answer "which rail is running", because on this fourth cell those are
-//! different questions and the compiler cannot tell them apart — a
-//! `not(feature = "backend-vulkan")` block meaning "the Metal arm" simply
-//! disappears, silently, the moment both features are on. Everything the
-//! running rail decides goes through [`backend::Backend`], whose implementation
-//! the process picks once in [`backend::select`]; the `cfg`s that remain are
-//! module declarations and the arms of that one selection.
-//!
-//! Do not reintroduce `not(feature = "backend-vulkan")` as a spelling of "the
-//! Metal arm". It says what the build is *not*, which stopped being equivalent
-//! the moment this cell existed.
+//! The library logs through the `log` crate: a Rust host installs its own logger.
 
-#![deny(unsafe_op_in_unsafe_fn)]
-#![deny(rust_2018_idioms)]
+// With the `vulkan` feature, the proof that a window's presenter is `Send` (its swapchain, the
+// swapchains it retired, and the runtime's types under them) nests deeper than rustc's default
+// limit of 128 (E0275), as the C crate's does.
+#![recursion_limit = "256"]
 
-#[cfg(not(any(feature = "backend-metal", feature = "backend-vulkan")))]
-compile_error!("select at least one of backend-metal or backend-vulkan");
+#[cfg(all(target_os = "linux", not(feature = "vulkan")))]
+compile_error!("on Linux the library is the Vulkan platform's: build it with the `vulkan` feature");
 
-#[cfg(all(feature = "backend-metal", not(target_os = "macos")))]
-compile_error!(
-    "backend-metal requires target_os = \"macos\": there is no host-stub Metal \
-     arm. Use --no-default-features --features backend-vulkan,host-window on \
-     any other host."
-);
-
-// Vulkan reaches the GPU through MoltenVK on macOS and a native ICD on
-// Linux; Windows hosts use their native ICDs (NVIDIA/AMD/Intel ship
-// VK_KHR_win32_surface and Vulkan 1.2+). Any other host is untested rather
-// than known-broken — name it here so a new port is a deliberate edit to this
-// list, not an accident.
-#[cfg(all(
-    feature = "backend-vulkan",
-    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
-))]
-compile_error!(
-    "backend-vulkan is supported on target_os = \"macos\" (MoltenVK), \
-     target_os = \"linux\", and target_os = \"windows\" (native ICDs)"
-);
-
-/// Operator configuration: the switches this device reads, their names, and the
-/// one place they parse.
-///
-/// Named `config` rather than `env` because the environment is how a switch
-/// arrives today and not what it *is*. The crate owns the declaration, the
-/// parse and the rule — see `reims_vgpu_config` for why a switch may only
-/// narrow what this device does and may never widen it.
-pub use reims_vgpu_config as config;
-/// The backend-neutral protocol vocabulary, in the crate that owns it.
-///
-/// The first layer allowed to say what a wire tag *means*: formats, layouts,
-/// geometry, page arithmetic, the closed ordinal rules, and the refusals they
-/// name. It absorbed `reims-vgpu-contract`, which had the same job under a
-/// second name — one vocabulary in two crates is two places to look and two
-/// places for a rule to drift.
-///
-/// See `reims_vgpu_protocol` for what the crate boundary makes true that a
-/// module boundary only asserted.
-pub use reims_vgpu_protocol as protocol;
-pub mod model;
-/// Crate-wide observability: the always-on fail sink and the decline
-/// vocabulary. Above `runtime/` because every subsystem owes the reader a
-/// reason, and `translate/` + `caps/` must be able to name one without
-/// depending on `runtime/`.
-pub mod observe;
-pub mod runtime;
-
-pub mod backend;
-pub mod qemu;
-
-/// Host-owned presentation window — a Rust-owned `winit` window that replaces
-/// QEMU's UI. See [[host-window]].
-///
-/// The feature names no backend. Which rail fills the window is a run-time
-/// answer (`backend::Backend::presents_host_window`) and every rail can:
-/// Vulkan drives a swapchain on a `VkSurfaceKHR`, Metal a `CAMetalLayer` on the
-/// same native view. It is enabled on every product arm.
-#[cfg(feature = "host-window")]
-pub mod host_window;
-
-/// The device registry and the entry surface `qemu::abi` wraps. Private, with
-/// the names that surface reaches re-exported below — the shape
-/// `display_surface` and `window_publish` already use.
 mod device;
-pub(crate) use device::{
-    backend_name, device_console_feed, device_create, device_cursor_glyph_copy,
-    device_cursor_glyph_info, device_destroy, device_drain, device_efi_console_copy,
-    device_gfx_read, device_gfx_write, device_iosfc_read, device_iosfc_write, device_poll,
-    device_pop_action, device_reset, device_scanout_copy, device_scanout_may_paint,
-    device_window_run_main, device_window_set_early_fb, device_window_start, device_window_stop,
-    unwind_safe, ConsoleFeed, CursorGlyphInfo,
+mod display;
+mod entry;
+mod error;
+mod frame;
+mod iosurface;
+pub mod platform;
+mod retained;
+pub mod singleton;
+mod stats;
+mod window;
+
+pub use device::{Device, DeviceConfig, HostCallbacks, MemoryFile, MemoryMap};
+pub use display::{
+    CursorGlyph, CursorGlyphFn, CursorMoveFn, CursorShowFn, Display, DisplayCallbacks,
+    DisplayConfig, DisplayMode, ModeChangeFn, NewFrameFn,
 };
+pub use error::{Error, ResumeError};
+pub use frame::{Frame, FrameTarget, MAX_FRAME_TARGET_SIZE, PixelFormat, Region};
+pub use iosurface::{IoSurfaceDevice, IoSurfaceDeviceConfig};
+pub use platform::ApiPlatform;
+pub use reims_vgpu_core::host::{
+    AddTraceRange, CreateTask, DestroyTask, HostPtr, HostTask, HostTraceRange, MapMemory,
+    PhysicalMemoryRange, RaiseInterrupt, ReadMemory, RemoveTraceRange, TraceRangeHandler,
+    UnmapMemory,
+};
+pub use reims_vgpu_core::platform::os::Preferences;
+#[cfg(target_os = "macos")]
+pub use reims_vgpu_metal::MetalPlatform;
+#[cfg(feature = "vulkan")]
+pub use reims_vgpu_vulkan::VulkanPlatform;
+
+/// The platform every handle is made on by default: `MetalPlatform` on macOS.
+#[cfg(target_os = "macos")]
+pub type DefaultPlatform = MetalPlatform;
+/// The platform every handle is made on by default: `VulkanPlatform` on Linux.
+#[cfg(target_os = "linux")]
+pub type DefaultPlatform = VulkanPlatform;
+pub use reims_vgpu_window::{
+    BUTTON_EXTRA, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_SIDE, CloseFn, KeyFn,
+    MomentumPhase, PointerFn, ScrollEvent, ScrollFn, ScrollPhase, WheelFn, WindowCallbacks,
+    WindowConfig,
+};
+
+/// The most display ports a device has.
+pub const MAX_DISPLAY_PORTS: u32 = reims_vgpu_core::device::config::MAX_DISPLAY_PORT_COUNT;
+/// The size of the device's MMIO region: the PCI BAR, or vmapple's first region.
+pub const DEVICE_MMIO_SIZE: u64 = reims_vgpu_core::device::config::DEFAULT_MMIO_LENGTH;
+/// The PCI vendor ID of the device.
+pub const PCI_VENDOR_ID: u16 = 0x106b;
+/// The PCI device ID of the device.
+pub const PCI_DEVICE_ID: u16 = 0xeeee;

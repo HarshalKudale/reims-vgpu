@@ -1,142 +1,346 @@
-# AGENTS.md
+# Working on this repository
 
-This project emulates Apple's paravirtualized GPU. The unmodified macOS guest supplies the driver;
-QEMU and the Rust backend decode its command stream and execute it through Metal or Vulkan.
+This repository builds `libreims_vgpu`, a Rust library that is the host
+side of the paravirtualized GPU macOS guests drive (PCI `106b:eeee`, and
+vmapple's MMIO device), in place of Apple's
+`ParavirtualizedGraphics.framework`:
+- the library and its C API, `reims_vgpu.h`, which `cargo xtask dist`
+  writes into `target/dist` with a pkg-config package and the option ROM;
+- the option ROM (`firmware/`), the PCI device's UEFI driver in C, which an
+  x86-64 guest's firmware runs;
+- QEMU's `apple-gfx` (`vendor/qemu`), in C on that API, which finds the
+  library through pkg-config and links it statically;
+- the behaviour-lock suite (`tests/suite`), whose runner drives the C API
+  as QEMU does.
 
-Nested `AGENTS.md` files apply within their directories.
+The library draws frames with its own shaders. On macOS it runs on Metal.
+On Linux it runs on the Vulkan platform (`crates/reims-vgpu-vulkan`), over
+metal2vulkan's Metal-shaped runtime, which a Mac can also build on MoltenVK.
+Under process isolation it runs each guest task other than task 0 on threads
+of its own, in the host's process.
 
-## Build the contract into the structure
+[README.md](README.md) says what the project is and how it is laid out. This
+file covers what holds the code, how to check a change, and the rules for
+changing it. [docs/architecture.md](docs/architecture.md) describes the
+code, and [docs/conventions.md](docs/conventions.md) the conventions it
+follows.
 
-- Implement behavior from decoded fields, layouts, calling conventions, or host capabilities. If a
-  decision-affecting contract term is unknown, recover it or return a typed refusal; do not guess.
-- Put each invariant in the type, resolver, transaction, or state machine that owns it. Change the
-  owner when it cannot express the invariant instead of adding call-site flags, duplicate lookups,
-  fixup passes, or special cases around it.
-- Parse guest ordinals once into total Rust types and carry those types. Keep page geometry explicit
-  through `page_shift` or `page_size`, and derive constants from the contract.
-- Prefer making invalid states unrepresentable, deriving duplicated values from one source, and
-  testing behavior at the owner's boundary.
-- Gate optional paths on structural capabilities, not device names. Environment overrides may
-  narrow capability but never widen it.
+**The codebase is its own reference.** Its unit tests, its pins and the
+suite's expected files record what it does. Every merge ends green: the
+merged tree passes what the tree before it passed. A change meant to
+alter behaviour records the affected files again from its own build, and the
+diff is reviewed with the change.
 
-Conformance records compatibility; it does not define an unknown API contract. Static inspection
-of locally available binaries is acceptable for recovering missing contracts, but third-party
-bytes, disassembly, extracted assets, and binary provenance must remain local and uncommitted.
-Persist only the resulting field, layout, lifetime, ordering, or calling-convention contract.
+## Start here
 
-## Ownership boundaries
+```sh
+make                # the library in target/dist (cargo xtask dist): libreims_vgpu.a and
+                    # .dylib, reims_vgpu.h, reims-vgpu.pc and the option ROM
+make smoke          # link it as QEMU does and run an isolated guest task
+make test           # the suite on the checkout's library, against its expected files
+cargo xtask check   # lints, rustfmt, clippy and every test: run it once before a branch merges
+```
 
-- `vendor/qemu`: thin QEMU device shim for QOM, MMIO/BAR, IRQ/MSI, display integration, and
-  `HostOps` plumbing.
-- `crates/reims-vgpu`: device model, decode, mapping, scheduling, command execution, presentation,
-  and backend policy.
-- `crates/reims-vgpu-wire`: derived wire views; its nested instructions also apply.
-- `crates/reims-vgpu-protocol`: `no_std`. The first layer allowed to assign meaning to a wire tag —
-  backend-neutral layouts, formats, geometry, page arithmetic, closed ordinal rules, and the
-  contract refusals they name.
-- `crates/reims-vgpu-core`: the backend-independent semantic model. Transactions, dependency and
-  publication domains, session generations and device epochs, the fixed executor, and the serial
-  reference interpreter every parallel schedule is checked against. It can name no Vulkan handle,
-  Metal object, QEMU structure or guest-RAM pointer, and its dependency list is that claim.
-- `crates/reims-vgpu-memory`: the guest-RAM bound — imports, checked slices, page footprints.
-- `crates/reims-vgpu-config`: the single parse and declaration point for operator switches. An
-  override may only narrow what the device does; it may never widen it.
-- `crates/reims-vgpu-observe`: typed observations and refusals. It describes decisions but does not
-  select behavior.
-- `crates/reims-vgpu-vulkan`: the Vulkan rail — the only layer that turns host
-  capabilities into placement and transfer policy. It sees `ash`, the semantic
-  model, the refusal vocabulary and the operator switches, and nothing of QEMU,
-  the device model, guest-RAM ownership or decode.
-- `crates/reims-vgpu-testkit`: shared behavioral fixtures and test instruments —
-  where the oracle's capture is, whether it is there, how the suites that read it
-  read it, and the allocation counter the structural-zero suites measure with.
-- `conformance`: native-oracle and guest-visible compatibility cases.
-- `vm`: rail-selected, snapshot-reverting boot harnesses.
+The Makefile's header lists every target (`bless`, `coverage`, `qemu`, `vm`,
+`clean`). README.md lists the requirements.
 
-Product logic belongs in Rust. C and Objective-C connect QEMU to Rust and must not reconstruct
-policy from multiple Rust queries. Shared C/Rust constants need a `qemu::abi::header_define` test.
-No panic may cross an FFI boundary.
+## Where things are
 
-Guest RAM bounds and provenance belong to `crates/reims-vgpu-memory`; extend `GuestRamImport` or
-`GuestSlice` instead of exposing raw pointers and offsets. Resource state that represents guest
-work follows the contract-owned guest lifetime. Do not silently evict it with arbitrary cache
-bounds; refuse excess work explicitly when the contract provides no lawful loss.
+| what | where |
+|---|---|
+| the Cargo workspace and its six crates | `Cargo.toml`, `crates/` |
+| `reims-ctl`, the VM manager users run, and its installer | `crates/reims-ctl` (a workspace of its own, linking nothing of the library), `scripts/install-ctl.sh` |
+| the C API | `crates/reims-vgpu-c/include/reims_vgpu.h`, specified in [docs/api.md](docs/api.md) |
+| isolated tasks | `crates/reims-vgpu-core/src/tasks/isolation`, `crates/reims-vgpu-core/src/gpu_task` |
+| the display's and XR10's shaders | `crates/reims-vgpu-metal/src/gpu/shaders.metal` |
+| the Vulkan platform | `crates/reims-vgpu-vulkan`, over metal2vulkan's runtime, at the commit of its public repository `Cargo.toml` names; what its defaults trade against Metal's answers is [docs/accuracy-ledger.md](docs/accuracy-ledger.md) |
+| the Vulkan platform's metallibs, which a build off a Mac copies | `crates/reims-vgpu-vulkan/metallibs`, written on a Mac by `cargo xtask metallibs` (README.md, Building) |
+| a display's own window, and the register of what it does | `crates/reims-vgpu-window`, its `features.md` and its manual walk on macOS, `scripts/walk_window_macos.sh`; the wiring is `crates/reims-vgpu/src/window.rs` |
+| the dist tree QEMU and the suite link | `xtask/src/dist.rs` (`cargo xtask dist`) |
+| the option ROM `apple-gfx-pci` loads | `firmware/`, described in [docs/architecture.md](docs/architecture.md) section 11.4 |
+| `cargo xtask` | `xtask/` |
+| the behaviour-lock suite | `tests/suite` ([README](tests/suite/README.md)); its runner is `tests/suite/runner/pgrun.m`, and its specification and the guest ABI are [docs/testing.md](docs/testing.md) |
+| the pins | `crates/reims-vgpu-c/tests/pins` (the C API) |
+| QEMU and VM boots | `vendor/qemu`, `scripts/run_vmapple.sh`, `scripts/vm_drive.py`, [docs/qemu.md](docs/qemu.md) |
+| the architecture | [docs/architecture.md](docs/architecture.md) |
+| traps the suite and reviews caught | [docs/lessons.md](docs/lessons.md) |
+| measured platform facts | the docs of the modules that rely on them |
 
-For asynchronous work, the owning transaction must retain inputs through host completion, make
-results visible before the completion word or interrupt, and prevent callbacks or memory access
-after the guest may release or reuse resources. Submission is not completion.
+## The contract
 
-Unknown, dropped, rejected, degraded, or unsupported guest work must produce a typed reason on the
-always-on failure channel. Expected not-ready control flow stays quiet. Read environment variables
-only through the configuration owner.
+The guest drivers were written against Apple's framework, and the host
+drives this library through its C API, as QEMU's `apple-gfx` does. What the
+guest and the host observe is the contract, in its order:
+- C API results: every status, returned value and refusal;
+- host callbacks, with their arguments and their order, on the threads the
+  header names for each ([docs/api.md](docs/api.md) section 5): a library
+  thread, or the host's own inside a call that may call back. A process's
+  display callbacks run one at a time, in the order the library queued them;
+- the order of operations on guest memory and on retained objects: task
+  creates and destroys, maps, unmaps and reads, releases and IOSurface use
+  counts;
+- guest memory and MMIO reads;
+- interrupts, and their order relative to guest-visible writes;
+- display frames, pixels, modes and the cursor;
+- GPU results;
+- every value that reaches the guest: IDs, GPU addresses, numbering and
+  stamps;
+- where a run dies or hangs: invalid guest input ends the process at the
+  same op, or, in an isolated task's own code, ends that task there; a hang
+  stays a hang there.
 
-## Supported pathways
+An effect that shows at the API only under a race, a mid-operation release
+or exhaustion is still part of it.
 
-| Pathway | Host | Guest | Attach | Page shift | Backend |
-|---|---|---|---|---|---|
-| x86 macOS | Linux x86_64 KVM | x86_64 macOS | PCI | 12 | Vulkan |
-| arm64 macOS | Apple Silicon HVF | arm64 macOS | sysbus | 14 | Metal |
-| arm64 macOS | Apple Silicon HVF | arm64 macOS | sysbus | 14 | Vulkan/MoltenVK |
-| arm64 macOS | Apple Silicon HVF | arm64 macOS | sysbus | 14 | both, chosen at run time |
+**What is free**: which library thread runs what where the header names no
+thread, internal locking, how isolated tasks are hosted and reach the
+device, the retention machinery (autorelease pools, retains) where the order
+of releases the host sees is unchanged, Metal's internal call order where no
+result or guest-visible value changes, and diagnostics (log lines and their
+targets, thread and queue names, Metal labels, crash messages, signals).
 
-The last row is one binary carrying both rails, built with
-`scripts/qemu-build/qemu-build.sh --backend both` and selected per run with `REIMS_VGPU_RAIL`.
-It exists so the same guest stream can be executed through native Metal and through MoltenVK
-without a rebuild, which is the only way to attribute a wrong frame to metal2vulkan rather than to
-this device. It is a measurement configuration, not a shipping one; the three rows above it are
-what ships.
+**The interface stays whole:** the C API is the hosts' interface. QEMU's
+`apple-gfx` and the suite's runner call it, and its changes are additive
+(docs/api.md section 1): no function, field, constant or status value is
+renamed, renumbered or removed. `cargo xtask header --check` keeps the
+committed header equal to cbindgen's output.
 
-**A `cfg` may answer only "what did this build compile". It may never answer "which rail is
-running".** Those are different questions on the fourth row and the compiler cannot tell them
-apart: a `not(feature = "backend-vulkan")` block meaning "the Metal arm" disappears silently when
-both features are on, and a `feature = "backend-vulkan"` block meaning "the running rail" executes
-against Metal. Every decision the running rail makes goes through `backend::Backend`, whose
-implementation `backend::select` picks once per process. Tests obey the same rule: name the rail
-(`MetalBackend`, `VulkanBackend`) when the test is about one, and ask `selected().rail()` when the
-expected answer legitimately differs.
+## Checking a change
 
-Do not generalize observations between architectures, backends, memory topologies, host GPU
-classes, or guest rails. Vulkan 1.2 is the baseline; newer functionality requires a
-capability-gated fallback. Host-pointer import is optional, and guest-visible semantics must be the
-same on imported and copying paths.
+Run the checks a change can reach, and no others. Measured on the M3 Max,
+`cargo xtask check` takes about 3 min, 180 s after a core edit, of which
+the workspace's tests are 138 s of GPU time and core's x86-64 tests under
+Rosetta 8 s; `make test`, the full suite, takes 5 min of GPU time. Some of
+the Vulkan crate's GPU tests (the YCbCr sampling sweeps among them) fail
+under the check's own load and pass run again alone.
 
-## Working and verification
+| the change touches | check it with |
+|---|---|
+| the library (`crates/`), the C API or its header | `cargo xtask check`, and `make test` where the change reaches what the suite drives (core, the Metal platform, the C API) |
+| what the Vulkan platform ends the process on, or what device info, GPU families or feature queries answer | the library's checks, and a cold boot of each guest the change can reach before it merges ("A boot is the only check", below) |
+| a `.metal` source of the Vulkan crate, or the metal crate's `shaders.metal` | `cargo xtask metallibs` on a Mac, committing the metallibs it writes with the change; then the library's checks |
+| the suite's runner, `normalize.py` or scenarios | `make test` on the cases it affects, and the records it re-records (below) |
+| `xtask/` | `cargo test -p xtask`, rustfmt and clippy on it |
+| `crates/reims-ctl` | `cargo test`, `cargo fmt --check` and `cargo clippy --all-targets` in it (`cargo xtask check` does not reach it); a change to the QEMU command it builds, or to `scripts/install-ctl.sh`, also needs an install and a VM boot on each host it touches |
+| `firmware/` | build it (`make -C firmware`); a change not meant to alter what the guest's firmware sees keeps the ROM's bytes |
+| `vendor/qemu` | build it (`make qemu`) and realize the devices paused (`-S`); a change to `hw/display/apple-gfx*.c`, or to what QEMU calls, also needs a VM boot ([docs/lessons.md](docs/lessons.md), [docs/qemu.md](docs/qemu.md)) |
+| docs and comments | nothing |
 
-Use a workflow proportionate to the change:
+Neither `cargo xtask check` nor the suite builds or runs QEMU or the option
+ROM, and the suite sees only the library's C API. When a rule here seems to
+ask for a check the change cannot affect, say why it is skipped.
 
-1. Reproduce or otherwise identify the behavior being changed.
-2. Establish the relevant contract and its owner. Use focused instrumentation when necessary.
-3. Add an owner-level regression test when the invariant is testable there.
-4. Implement the invariant in its owner.
-5. Format and run the focused and affected tests. Run GPU-touching Rust tests serially.
-6. For guest-visible translation or rendering changes, run the relevant conformance case and live
-   pathway. Use the broader conformance suite when the change can affect unrelated cases.
+Three tiers:
 
-Mechanical changes do not require VM or conformance work unless they can change behavior. A defect
-seen only in an unmodified guest requires a live guest check. Intermittent failures require repeated
-runs before claiming a fix. State what was actually verified without treating one pathway as proof
-of another.
+1. **The loop**, while editing: build, then run only the affected tests
+   (`cargo nextest run -p <crate> -E 'test(/<pattern>/)'`) and the affected
+   suite cases (`make test TEST=<patterns>`). The loop never runs clippy,
+   rustfmt or rustdoc.
+2. **The task**, once: one commit per task, staging only the task's own
+   paths (`git add <new files>`, then `git commit -m ... -- <paths>`), never
+   `git add -A` or `git commit -a`. A commit runs no full check.
+3. **The merge**, once per branch, by whoever merges it: the checks the
+   branch's changes reach (the table), once, on its tree before it merges
+   into the integration branch. A failure gets a fix commit on the branch
+   before it merges. A GPU test that fails under the check's load runs once
+   more alone; passing alone, it is not a failure. Nothing runs beyond that
+   for its own sake: no second suite, sweep, review or confirming run.
 
-For VM work, select and report the rail explicitly. Ensure an older VM cannot answer probes, clear
-`/tmp/reims-vgpu-fail.log` before a new evidence run, and preserve the useful crash or serial output
-before rebooting. Use host-driven input and host-owned frame capture for visual interactions.
+- **The load-sensitive cases** (tests/suite/README.md) can fail under
+  concurrent GPU load. Run one again alone before calling it a failure.
+- **Wall-clock first, nothing skipped.** Checks run in the background,
+  cheapest to fail first (the affected tests, then `cargo xtask check`, then
+  the suite), and stop at the first failure. While a slow run or a boot is
+  in flight, work the runs have already shown goes on. Work may be reordered
+  freely; a check the change reaches is never skipped, a result never faked
+  and a comparison never loosened.
+- **A boot is the only check of what guests choose.** The suite and the unit
+  tests run the library's own shaders and scenarios, and guest shaders are
+  never committed, so neither sees which code a guest's frameworks pick from
+  the device's answers, nor a death every boot reaches
+  ([docs/lessons.md](docs/lessons.md)). For the table's row: first look up
+  each code the change would end the process on in the last good boot's
+  logged degradation counts, which needs no GPU; then boot each guest cold
+  and fail on any `reims-vgpu: fatal` line. An answer stays as it was until
+  the guests boot with the new one, and each exact fix of a death lands
+  with a test of its pattern in a shader of our own.
+- **A change meant to alter what the guest or host observes** is its own
+  commit.
+  - It records the affected expected files again from its own build
+    (`make bless TEST=<patterns> ARGS=--update`), and re-records the pin
+    files it changes (`RVG_PINS_RECORD=1 cargo test -p reims-vgpu-c --test
+    pins`).
+  - The commit message says what changed for the guest or the host. The
+    diff of the expected files is the review.
 
-Follow `conformance/README.md` when changing or running conformance. Native results establish the
-expected Metal behavior; existing classified guest failures are compatibility debt, not permission
-to add or hide regressions.
+The suite's inputs:
+- A scenario's ops and the runner (`runner/pgrun.m`, `pgtest/normalize.py`)
+  are hashed into every expected file's input.
+- A scenario's docstring is not, so editing it needs nothing more.
+- Changing a scenario's ops records its files again (`make bless`).
+- Changing the runner or `normalize.py` records every file again: do it in
+  its own commit, and check that the observations did not change.
+- Never edit an expected file by hand, and never loosen a comparison to make
+  a change pass.
 
-Run formatting, tests, clippy, feature checks, documentation checks, and live validation only for
-the workspaces, features, APIs, and pathways the change can affect. Do not weaken warnings or tests
-to make a gate pass. Treat every commit as a release candidate: clear regressions exposed by the
-change before committing rather than recording knowingly broken intermediate states.
+## Working in parallel
 
-## Repository safety
+- **Each agent works in a worktree of its own** (`git worktree add`), from
+  its first edit, docs included, on a branch of its own. The main checkout
+  is the owner's: agents do not edit it. Finished work is merged on an
+  integration worktree, and the owner's branch is fast-forwarded to it once
+  the merge's checks pass.
+- **Each worktree has its own `CARGO_TARGET_DIR`** under `~/.cache`: cargo
+  can run another tree's `xtask` from a shared one
+  ([docs/lessons.md](docs/lessons.md)). Caches never go under `/tmp`.
+- **Two full checks at once can exceed RAM** (one test maps 32 GiB), and
+  full suites compete for the GPU: run one at a time on the host.
+- **Set work aside with a WIP commit or a patch**, never `git stash`, whose
+  list every worktree shares.
+- **Never initialise `vendor/qemu` inside a worktree** that shares the main
+  checkout's module repository: it rewrites the module's `core.worktree`
+  ([docs/lessons.md](docs/lessons.md)). A worktree that builds QEMU clones
+  the submodule for itself.
+- **Keep agents few**: as many as the critical path needs, each stopped when
+  its work is done.
+- **Whoever merges resolves the merge.** Merging finished work and
+  fast-forwarding the owner's branch are not questions for the owner.
+  Uncommitted work is never called merged, or clean to merge, before a
+  hunk-level comparison shows it.
+- **Clean up after merged work**: remove its worktree (saving any dirty
+  diff first) and its target directory. When a VM round ends, remove its
+  disk clones and keep its logs. Never remove a worktree or cache someone
+  else made.
+- **The metal2vulkan pin in `Cargo.toml` moves in batches**: to a newer
+  runtime commit once a set of changes has landed, or one the work waits
+  on, with one merge's checks for the move and what rides with it, never a
+  check per runtime commit.
+- **Decide what the rules decide.** A routine trade-off (a residual, an
+  interim difference, where a death goes, the order of work) is decided from
+  these rules and the docs, and reported with its reason. The owner decides
+  large spends of time or money, the project's direction and rules, and
+  anything irreversible or outward-facing. A question for the owner never
+  blocks the rest of the work.
 
-Existing dirty changes belong to the user. Preserve them and avoid unrelated edits. Do not use
-checkout, switch, stash, reset, or restore to manufacture a baseline in the shared checkout; use an
-isolated copy when a control build is needed. Create a new commit by default; amend an existing
-commit only when the user specifically requests or authorizes it.
+## Rules for changing code
 
-Do not commit guest images, firmware, captured shaders, AIR, SPIR-V, disassembly, extracted assets,
-or other third-party binary material. Keep investigation artifacts in ignored locations. Commit
-only task-related source and state validation results narrowly.
+- **Behaviour changes are deliberate.** Some behaviours look odd and are
+  kept because guests or hosts may rely on Apple's framework behaving that
+  way ([docs/testing.md](docs/testing.md) section 7 lists them). Changing
+  one is a behaviour change: make it on purpose, in its own commit, with its
+  expected files recorded again and the reason stated.
+- **The window's features are a register.** What a display's window does
+  for the person at the host is listed in
+  `crates/reims-vgpu-window/features.md`, each entry with its guard: a named
+  test, which `features_md_guards_exist` keeps, or a manual check on a VM
+  boot. Dropping or changing an entry is a deliberate change, made in its
+  own commit that updates the file and says why.
+- **Unread is not dead.** The binary versions and the features each gives
+  (`guest/abi/features.rs`), the device's feature level, `Preferences` and
+  `DisplayMode::with_preferences`, the device-info family bits (the −1009
+  bit among them), and suspend and resume in the C and the Rust API stay,
+  though nothing reads or calls some of them: hosts are to configure the
+  features, and hosts other than QEMU call suspend and resume. They may be
+  reshaped, never removed.
+- **The Vulkan platform's rules** (guest memory in place, where stalls are
+  fixed, what is the runtime's, dependencies as released) are in
+  [docs/conventions.md](docs/conventions.md).
+- **Never guess a name.** A field of a guest record or of a copy of a Metal
+  struct whose meaning nothing states is `field_xx`, `xx` its byte offset in
+  lowercase hex. A wrong name is worse than an unknown one: it attaches the
+  wrong meaning to the right bytes, and nothing flags it.
+- **Say what the code does.** Comments and docs describe the code and what
+  the guest or host observes. They do not cite the earlier ports, which
+  stay at their tags (README.md, History).
+- **arm64 on the Mac.** Every Rust binary built for macOS is arm64
+  (`aarch64-apple-darwin`). rustc's arm64e target has no pointer
+  authentication, and its binaries crash before `main`
+  (`rust-toolchain.toml`). On Linux the library ships as
+  `x86_64-unknown-linux-gnu`, built there.
+  `cargo xtask check` on a Mac also clippy-checks that target, and, where
+  Rosetta is installed, runs core's tests as `x86_64-apple-darwin`, for
+  the x86-64 guest's 4 KiB pages and instructions; it skips them, saying
+  so, where Rosetta is not. No x86-64 macOS binary ships.
+- **Run `cargo xtask check` once before a branch that changes the library
+  merges**, not before each commit (Checking a change).
+- **Stage explicit paths, and never commit build output.** Before each
+  commit, `git diff --cached --name-only | grep -E
+  '(^|/)target[^/]*/|\.(bin|o|obj|rlib|rmeta|dylib|a|efi|rom)$'` must print
+  nothing.
+  - **The one exception is metallibs** compiled from this repository's own
+    `.metal` sources, which only Apple's compiler makes: the Vulkan
+    platform's, in `crates/reims-vgpu-vulkan/metallibs`, which a build off a
+    Mac copies, and the suite's inputs, in `tests/suite/fixtures/shaders`.
+    Each is committed with the source it is compiled from. The Vulkan
+    platform's are rewritten by `cargo xtask metallibs` on a Mac, and a
+    stale one fails the Mac's `cargo xtask check` and the Linux build.
+- **Never commit Apple binaries.** The build needs none: the option ROM is
+  built from `firmware/`. The committed metallibs hold only our shaders and
+  constant samplers, with no Apple code linked in. Nothing taken from a
+  guest or from Apple's binaries is committed or pushed either: a guest's
+  shader caches and metallibs, what is translated or dumped from them, logs
+  that carry its serialized descriptors, excerpts of Apple's code. A report
+  to an upstream project carries inputs written from scratch.
+
+## Fixing bugs
+
+- **Fix what runs show.** Boot guests and use their apps, and fix the
+  deaths, glitches, stalls and slow frames they show, biggest first, end to
+  end. A gap no run reaches waits, unless it is cheap.
+- **Fix a case by its class.** A boot shows only its first death, and users
+  would meet the rest: when a run finds one unhandled case, find every case
+  of its kind (every pixel format, every death site, every refusal of the
+  runtime) and fix them together.
+- **Reproduce under the conditions the bug was seen in**, not under a
+  theory's trigger. Size a proof window from the measured failure rate, and
+  ship a cheap, low-risk fix as soon as the evidence points to it, with its
+  confirmation run behind it.
+- **Check a claim before relaying it.** A claim about Metal is tagged
+  measured or read from code ([docs/testing.md](docs/testing.md), "Tags").
+  A claim that the hardware cannot do something is checked against the
+  driver (its format features and extensions) first.
+
+## GPU and VM discipline
+
+The suite's cases fault the GPU and crash processes on purpose, and the GPU
+watchdog corrupts concurrent work.
+
+- **A VM boot never overlaps GPU work.** The suite never boots a VM. Before
+  a boot, whoever may run GPU work holds it ([docs/qemu.md](docs/qemu.md),
+  "Booting a guest to check a change", which also says how a boot checks
+  its screen and which crashes are out of scope).
+- **A boot writes only a copy** of a guest's disk (a clone, or a
+  `snapshot=on` overlay), and a step that changes the guest's state runs
+  only there. A damaged disk is copied again from its source.
+- **Measure what users get.** Boots and timings run on hosts set up as
+  users' are: no option that dodges a host policy users have (a renamed
+  process, a raised priority, a stopped daemon). Undo only what the harness
+  itself adds. Contention under such a policy is the code's to fix.
+- **Run the load-sensitive cases again alone** before counting a failure.
+- **Stop only the processes you started**, by their pids.
+
+## Conventions
+
+- Branches are prefixed `steelbrain/`.
+- Commit messages use an emoji prefix (`:new:`, `:bug:`, `:art:`,
+  `:racehorse:`, `:fire:`, `:memo:`, `:white_check_mark:`), imperative mood,
+  a subject of at most 72 characters, and a body wrapped at 80 that explains
+  why. Docs-only commits carry `[ci skip]`.
+- Never `git push` unless asked.
+- Merged commits are not rewritten: a fix to merged work, a review's
+  included, is a new commit on top. Amend only a commit the owner names; a
+  flaw only in a merged commit's message stays.
+- Scratch goes under `/tmp`, and is removed when the work is done. Caches
+  (a target directory, a build kept for reuse) go under `~/.cache/<name>`,
+  and so does what must outlive a reboot, which empties `/tmp`: a worktree,
+  the state a long run resumes from.
+- The code's conventions are [docs/conventions.md](docs/conventions.md).
+
+## Recording what was learned
+
+- A trap about what decides behaviour, found by a review or by the suite,
+  goes in [docs/lessons.md](docs/lessons.md): what went wrong, why, and how
+  to spot the next one.
+- A measured platform fact goes in the `//!` doc of the module that relies on
+  it.
+- QEMU and VM measurements go in [docs/qemu.md](docs/qemu.md).
