@@ -2,12 +2,15 @@
 
 [![License: GPL-2.0-or-later OR LGPL-3.0-or-later](https://img.shields.io/badge/License-GPL--2.0--or--later%20OR%20LGPL--3.0--or--later-blue.svg)](LICENSE) [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/D2AM9mrDgs)
 
-> **Beta.** `reims-ctl` creates, boots and manages your macOS VMs. The work now is on platform- and
-> driver-specific differences, so what you see can still vary between hosts and their GPUs.
-> `reims-ctl`'s commands and VM settings, and the supported host/guest pathways, may still change.
+> **Beta.** reims-vgpu has largely stabilized. We're now working through differences between
+> platforms and GPU drivers, so how well it runs can still depend on your host and its GPU.
 
-reims-vgpu is an experimental virtual GPU for macOS guests. It lets macOS running inside a VM use
-accelerated graphics instead of a basic framebuffer, with the guest operating system unchanged.
+reims-vgpu is a virtual GPU for macOS VMs. It gives macOS running in QEMU accelerated graphics,
+through Metal on a Mac or Vulkan on Linux, using the GPU driver macOS already ships with. There's
+nothing to install in the guest.
+
+Alongside the GPU, we ship a QEMU build that uses it, and `reims-ctl`, a small tool that creates
+and runs macOS VMs for you.
 
 ![reims-vgpu running an arm64 macOS 13 Ventura guest desktop on an Apple Silicon host](assets/readme/reims-vgpu-macos-arm64-desktop.png)
 
@@ -19,11 +22,12 @@ accelerated graphics instead of a basic framebuffer, with the guest operating sy
 
 ## Getting started
 
-This tree ships the library, QEMU on it and `reims-ctl`, **not a ready-made macOS disk image**: you
-bring the guest. On an Apple silicon Mac that is an IPSW, or a VM made with macosvm or tart; on
-Linux, an OpenCore image with an installer or a disk already installed. On an M3 Max, arm64 macOS
-13.6, 14.6.1, 15.6.1 and 26.6.2 guests reach their desktops; x86-64 guests were measured with
-macOS 26.6.1 on an RTX 5080 Laptop GPU ([docs/qemu.md](docs/qemu.md)).
+You bring your own macOS; we don't ship disk images. On an Apple silicon Mac, that's an IPSW, or a
+VM you already made with macosvm or tart. On Linux, it's an OpenCore image with a macOS installer,
+or a disk that already has macOS on it.
+
+We've tested arm64 macOS 13, 14, 15 and 26 on an M3 Max, and x86-64 macOS 26 on Linux with an RTX
+5080 laptop GPU. [docs/qemu.md](docs/qemu.md) has the details.
 
 ### Install reims-ctl
 
