@@ -40,21 +40,6 @@ fetched from its public repository (`steelbrain/qemu-reims-vgpu`), at the commit
 pins, and Cargo fetches metal2vulkan from its public repository, at the commit the workspace's
 `Cargo.toml` names. `reims-ctl doctor` checks the host and the install.
 
-### arm64 guest on an Apple silicon Mac (HVF / vmapple)
-
-QEMU's `vmapple` machine boots what Virtualization.framework makes, so a guest comes from an IPSW
-or from an existing Virtualization.framework VM. There is no OpenCore step.
-
-```sh
-reims-ctl create mac --ipsw latest              # install the newest macOS this Mac supports (a 64G disk)
-reims-ctl create mac --ipsw ~/Downloads/UniversalMac.ipsw   # or a given IPSW
-reims-ctl create mac --bundle ~/VMs/macos13     # or import a macosvm or tart VM (an APFS clone)
-reims-ctl start mac                             # a window opens for each guest display
-```
-
-`make vm VM=path/to/macosvm-vm` boots a macosvm VM on `make qemu`'s QEMU without `reims-ctl`
-([QEMU and a VM](#qemu-and-a-vm)).
-
 ### x86-64 guest on Linux (KVM)
 
 1. **Host prep.** You need KVM (`/dev/kvm`) and a Vulkan driver; `reims-ctl gpus` lists the GPUs a
@@ -88,6 +73,21 @@ reims-ctl start mac                             # a window opens for each guest 
 
    Without it the guest's icon service crash-loops, and apps wait minutes for their icons
    ([docs/qemu.md](docs/qemu.md), "x86-64 macOS guests: Metal's error mode").
+
+### arm64 guest on an Apple silicon Mac (HVF / vmapple)
+
+QEMU's `vmapple` machine boots what Virtualization.framework makes, so a guest comes from an IPSW
+or from an existing Virtualization.framework VM. There is no OpenCore step.
+
+```sh
+reims-ctl create mac --ipsw latest              # install the newest macOS this Mac supports (a 64G disk)
+reims-ctl create mac --ipsw ~/Downloads/UniversalMac.ipsw   # or a given IPSW
+reims-ctl create mac --bundle ~/VMs/macos13     # or import a macosvm or tart VM (an APFS clone)
+reims-ctl start mac                             # a window opens for each guest display
+```
+
+`make vm VM=path/to/macosvm-vm` boots a macosvm VM on `make qemu`'s QEMU without `reims-ctl`
+([QEMU and a VM](#qemu-and-a-vm)).
 
 ### Day to day
 
