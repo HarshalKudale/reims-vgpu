@@ -309,7 +309,8 @@ pub struct Q35 {
     /// OVMF's code and variables (copies in the VM's directory).
     pub firmware_code: PathBuf,
     pub firmware_vars: PathBuf,
-    /// The installer, used in place.
+    /// The installer: used in place where absolute; relative, the VM's raw copy of a DMG
+    /// (`create::installer_media`), which a change of installer deletes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installer: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

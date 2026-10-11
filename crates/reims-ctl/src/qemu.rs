@@ -186,13 +186,13 @@ fn q35(vm: &Vm, ctx: &Ctx, a: &mut Vec<String>) -> Result<()> {
         .installer
         .as_deref()
         .map(|p| q.installer_kind.unwrap_or_else(|| MediaKind::for_path(p)));
-    match (q.installer.as_deref(), kind) {
+    match (q.installer.as_deref().map(|p| vm.path(p)), kind) {
         (Some(p), Some(MediaKind::Disk)) => {
             push(&[
                 "-drive",
                 &format!(
                     "id=installer,if=none,format=raw,snapshot=on,file={}",
-                    optp(p)
+                    optp(&p)
                 ),
             ]);
             push(&[
@@ -202,7 +202,7 @@ fn q35(vm: &Vm, ctx: &Ctx, a: &mut Vec<String>) -> Result<()> {
         }
         (p, _) => {
             // A CD drive, empty or with the installer's disc, so a disc can go in while it runs.
-            let file = p.map(|p| format!(",file={}", optp(p))).unwrap_or_default();
+            let file = p.map(|p| format!(",file={}", optp(&p))).unwrap_or_default();
             push(&[
                 "-drive",
                 &format!("id=cd,if=none,media=cdrom,readonly=on{file}"),
@@ -538,6 +538,17 @@ mod tests {
             ]
         ));
         assert!(has(&a, &["-device", "ide-hd,bus=sata.4,drive=installer"]));
+        // The VM's copy of a DMG, in its directory.
+        let q = vm.config.q35.as_mut().unwrap();
+        q.installer = Some("installer.img".into());
+        let a = invocation(&vm, &ctx(linux())).unwrap().args;
+        assert!(has(
+            &a,
+            &[
+                "-drive",
+                "id=installer,if=none,format=raw,snapshot=on,file=/vms/t/installer.img"
+            ]
+        ));
         let q = vm.config.q35.as_mut().unwrap();
         q.installer = Some("/isos/x.iso".into());
         q.installer_kind = None;

@@ -59,7 +59,7 @@ pins, and Cargo fetches metal2vulkan from its public repository, at the commit t
 
    ```sh
    reims-ctl create mac --opencore ~/OSX-KVM/OpenCore/OpenCore.qcow2 \
-     --installer ~/OSX-KVM/BaseSystem.img       # a new 128G disk
+     --installer ~/OSX-KVM/BaseSystem.dmg       # a new 128G disk
    reims-ctl create mac --from-script ~/OSX-KVM/OpenCore-Boot.sh   # or take all a launch script names
    reims-ctl start mac
    ```

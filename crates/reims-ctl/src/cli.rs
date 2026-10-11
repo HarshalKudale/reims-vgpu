@@ -7,7 +7,7 @@ use crate::{gpu, install, logs, paths, qemu, runtime, update};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -70,7 +70,8 @@ pub enum Cmd {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
-    /// Put an installer image in a VM (x86-64), into the running VM's CD drive where it can
+    /// Put an installer image in a VM (x86-64), into the running VM's CD drive where it can; a
+    /// DMG is converted to a raw image in the VM's directory
     Insert { name: String, path: PathBuf },
     /// Take the installer out of a VM (x86-64)
     Eject { name: String },
@@ -151,10 +152,11 @@ const CREATE_EXAMPLES: &str = r"
     reims-ctl create mac --opencore ~/OSX-KVM/OpenCore/OpenCore.qcow2 \
       --disk ~/OSX-KVM/mac_hdd_ng.img
 
-    # A new 128G disk and the macOS installer; once macOS is installed,
-    # reims-ctl eject mac takes the installer out
+    # A new 128G disk and the macOS installer (the recovery image as downloaded, or
+    # converted to BaseSystem.img); once macOS is installed, reims-ctl eject mac
+    # takes the installer out
     reims-ctl create mac --opencore ~/OSX-KVM/OpenCore/OpenCore.qcow2 \
-      --installer ~/OSX-KVM/BaseSystem.img --start
+      --installer ~/OSX-KVM/BaseSystem.dmg --start
 
     # Everything an OSX-KVM or ULTMOS launch script names: its disk (copied),
     # OpenCore, firmware, installer, CPU and MAC
@@ -197,7 +199,8 @@ pub struct CreateArgs {
     /// x86-64: the OpenCore image to copy (OpenCore.qcow2, from OSX-KVM or ULTMOS)
     #[arg(long)]
     pub opencore: Option<PathBuf>,
-    /// x86-64: the installer image (an .iso goes in a CD drive; BaseSystem.img as a disk)
+    /// x86-64: the installer image (an .iso goes in a CD drive; BaseSystem.img as a disk, and
+    /// BaseSystem.dmg too, converted to a raw image in the VM's directory)
     #[arg(long, alias = "iso", alias = "cdrom")]
     pub installer: Option<PathBuf>,
     /// x86-64: take the disk, OpenCore, firmware, installer, CPU and MAC from an OSX-KVM or
@@ -367,14 +370,15 @@ pub fn main(cli: Cli) -> Result<i32> {
         }
         Cmd::Insert { name, path } => {
             let mut vm = Registry::load()?.open(&name)?;
+            let path = paths::absolute(&path.to_string_lossy());
             println!(
                 "{}",
-                set_installer(&mut vm, Some(paths::absolute(&path.to_string_lossy())))?
+                set_installer(&mut vm, Some(path), &mut |p| println!("{name}: {p}"))?
             );
         }
         Cmd::Eject { name } => {
             let mut vm = Registry::load()?.open(&name)?;
-            println!("{}", set_installer(&mut vm, None)?);
+            println!("{}", set_installer(&mut vm, None, &mut |_| {})?);
         }
         Cmd::Gpus => gpus(host),
         Cmd::Logs {
@@ -713,7 +717,7 @@ pub fn describe(vm: &Vm, host: Host) -> Vec<(String, String)> {
             match &q.installer {
                 Some(i) => format!(
                     "{} ({})",
-                    paths::tilde(i),
+                    paths::tilde(&vm.path(i)),
                     if q.installer_kind == Some(vm::MediaKind::Disk) {
                         "disk"
                     } else {
@@ -780,16 +784,23 @@ fn show(vm: &Vm, host: Host) {
 }
 
 /// Sets the installer, and changes the running VM's disc where it can. Returns what happened.
-pub fn set_installer(vm: &mut Vm, path: Option<PathBuf>) -> Result<String> {
+/// A DMG is converted into the VM's directory first (`create::installer_media`), and the VM's
+/// copy of the installer it replaces is deleted.
+pub fn set_installer(
+    vm: &mut Vm,
+    path: Option<PathBuf>,
+    progress: &mut dyn FnMut(&str),
+) -> Result<String> {
     let running = runtime::running(vm);
     let name = vm.name().to_string();
+    let dir = vm.dir.clone();
     let q = vm
         .config
         .q35
         .as_mut()
         .context("only x86-64 VMs take installer media")?;
-    let old_kind = q
-        .installer
+    let old = q.installer.clone();
+    let old_kind = old
         .as_ref()
         .map(|_| q.installer_kind.unwrap_or(vm::MediaKind::Cdrom));
     if let Some(p) = &path
@@ -797,10 +808,25 @@ pub fn set_installer(vm: &mut Vm, path: Option<PathBuf>) -> Result<String> {
     {
         bail!("{} does not exist", p.display());
     }
-    let new_kind = path.as_deref().map(vm::MediaKind::for_path);
-    q.installer = path.clone();
+    // The VM's copy, named again by its path (the TUI shows it so), stays as it is.
+    let copy = old
+        .as_ref()
+        .filter(|o| o.is_relative())
+        .map(|o| dir.join(o));
+    let installer = match &path {
+        Some(p) if copy.as_deref().is_some_and(|c| same_file(c, p)) => old.clone(),
+        Some(p) => Some(create::installer_media(p, &dir, progress)?),
+        None => None,
+    };
+    let new_kind = installer.as_deref().map(vm::MediaKind::for_path);
+    q.installer = installer.clone();
     q.installer_kind = new_kind;
     vm.save()?;
+    if let Some(c) = &copy
+        && installer != old
+    {
+        let _ = std::fs::remove_file(c);
+    }
     if !running {
         return Ok(match &path {
             Some(p) => format!("{name}: {} attached for the next start", paths::tilde(p)),
@@ -818,6 +844,14 @@ pub fn set_installer(vm: &mut Vm, path: Option<PathBuf>) -> Result<String> {
     } else {
         Ok(format!("{name}: the installer changes at the next start"))
     }
+}
+
+/// Whether `a` and `b` name the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(a), Ok(b)) if a == b
+    )
 }
 
 fn set(a: SetArgs, host: Host) -> Result<()> {
@@ -1096,4 +1130,51 @@ fn doctor(host: Host) -> Result<i32> {
         );
     }
     Ok(if bad == 0 { 0 } else { 1 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_change_of_installer_deletes_only_the_vms_own_copy() {
+        let d = std::env::temp_dir().join(format!("reims-ctl-installer-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("vm")).unwrap();
+        let config = r#"
+            name = "t"
+            profile = "q35-x86_64"
+            cpus = 2
+            memory_mib = 4096
+            disk = "disk.qcow2"
+            [q35]
+            opencore = "opencore.qcow2"
+            firmware_code = "OVMF_CODE.fd"
+            firmware_vars = "OVMF_VARS.fd"
+            installer = "installer.img"
+            installer_kind = "disk"
+        "#;
+        let mut vm = Vm {
+            dir: d.join("vm"),
+            config: toml::from_str(config).unwrap(),
+        };
+        let copy = d.join("vm").join(create::INSTALLER_COPY);
+        let user = d.join("BaseSystem.img");
+        std::fs::write(&copy, [0u8; 4096]).unwrap();
+        std::fs::write(&user, [0u8; 4096]).unwrap();
+        let installer = |vm: &Vm| vm.config.q35.as_ref().unwrap().installer.clone();
+        let mut quiet = |_: &str| {};
+        // The copy, named by its path (as the TUI shows it), stays the VM's copy.
+        set_installer(&mut vm, Some(copy.clone()), &mut quiet).unwrap();
+        assert_eq!(installer(&vm), Some(create::INSTALLER_COPY.into()));
+        assert!(copy.is_file());
+        // Another installer replaces it, and the copy goes.
+        set_installer(&mut vm, Some(user.clone()), &mut quiet).unwrap();
+        assert_eq!(installer(&vm), Some(user.clone()));
+        assert!(!copy.exists());
+        // An installer used in place is never deleted.
+        set_installer(&mut vm, None, &mut quiet).unwrap();
+        assert_eq!(installer(&vm), None);
+        assert!(user.is_file());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

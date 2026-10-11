@@ -4,7 +4,8 @@
 //! own copies of OVMF's halves, and a new disk or an existing one (copied, reflinked where the
 //! file system can; a qcow2 overlay over it; or used in place). An existing OSX-KVM or ULTMOS
 //! launch script can supply what it names: the disk, OpenCore image, firmware, installer, CPU
-//! model and flags, and MAC.
+//! model and flags, and MAC. An installer is used in place, except a DMG, which qemu-img
+//! converts to a raw image in the VM's directory ([`installer_media`]).
 //!
 //! An arm64 VM (`vmapple-arm64`) is one Virtualization.framework made: installed here from an
 //! IPSW (vz.rs), or imported from macosvm's or tart's directory (an APFS clone of its disk and
@@ -371,12 +372,11 @@ fn make_q35(spec: &Spec, _host: Host, dir: &Path, progress: &mut dyn FnMut(&str)
     // A read-only source's copy is read-only too; the variables are written.
     let _ = make_writable(&dir.join("OVMF_VARS.fd"));
 
-    let installer = spec.installer.clone().or(s.installer.clone());
-    if let Some(i) = &installer
-        && !i.exists()
-    {
-        bail!("the installer {} does not exist", i.display());
-    }
+    let installer = match spec.installer.clone().or(s.installer.clone()) {
+        Some(i) if !i.exists() => bail!("the installer {} does not exist", i.display()),
+        Some(i) => Some(installer_media(&i, dir, progress)?),
+        None => None,
+    };
     let mut c = base_config(spec, Profile::Q35X86_64, disk, disk_format);
     if spec.cpus.is_none()
         && let Some(n) = s.cpus
@@ -475,6 +475,73 @@ fn import_disk(
             (PathBuf::from(name), ImageFormat::Qcow2)
         }
     })
+}
+
+/// The VM's raw copy of an installer DMG, in its directory.
+pub const INSTALLER_COPY: &str = "installer.img";
+
+/// Whether `p` is a DMG QEMU reads only through its dmg driver: a UDIF image, which ends in a
+/// 512-byte trailer starting `koly`. A read/write DMG (UDRW) has none: it is a raw image.
+pub fn is_dmg(p: &Path) -> Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
+    let len = f.metadata()?.len();
+    if len < 512 {
+        return Ok(false);
+    }
+    f.seek(SeekFrom::Start(len - 512))?;
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic)?;
+    Ok(magic == *b"koly")
+}
+
+/// The installer a VM in `dir` attaches for `src`: `src` itself, used in place, or, for a DMG
+/// (the BaseSystem.dmg OSX-KVM's fetch-macOS-v2.py downloads), a raw copy qemu-img writes into
+/// `dir`, named relative to it. QEMU could read the DMG itself, but decompresses a whole chunk
+/// for each read outside the last one: 4 KiB reads 1 MiB apart took 2.5 ms each from a 2.5 GiB
+/// recovery image against 0.05 ms from its raw copy, which took 10 s to make (measured on a
+/// Ryzen 7 7840HS).
+///
+/// The installed QEMU reads zlib DMGs (the recovery image fetch-macOS-v2.py downloaded is one);
+/// bzip2 and LZFSE ones only where it was built with their libraries, and LZMA and ADC ones never.
+pub fn installer_media(src: &Path, dir: &Path, progress: &mut dyn FnMut(&str)) -> Result<PathBuf> {
+    if !is_dmg(src)? {
+        return Ok(src.to_path_buf());
+    }
+    progress(&format!("converting {} to a raw image", file_name(src)));
+    // Written beside the copy and renamed over it: a running VM may have it open.
+    let part = dir.join(format!("{INSTALLER_COPY}.part"));
+    let converted = qemu_img(
+        Profile::Q35X86_64,
+        &[
+            "convert".as_ref(),
+            "-q".as_ref(),
+            "-f".as_ref(),
+            "dmg".as_ref(),
+            "-O".as_ref(),
+            "raw".as_ref(),
+            src.as_os_str(),
+            part.as_os_str(),
+        ],
+    );
+    if let Err(e) = converted {
+        let _ = std::fs::remove_file(&part);
+        let e = format!("{e:#}");
+        // qemu-img's warning names the compression: "dmg-lzfse module is missing", "chunks
+        // of unknown type".
+        if e.contains("module is missing") || e.contains("unknown type") {
+            bail!(
+                "{e}\n{} is compressed in a way this QEMU does not read: on a Mac, `hdiutil \
+                 convert {} -format UDZO -o <new>.dmg` makes a zlib copy, which it does",
+                file_name(src),
+                crate::qemu::quote(&src.to_string_lossy())
+            );
+        }
+        bail!("{e}");
+    }
+    std::fs::rename(&part, dir.join(INSTALLER_COPY))
+        .with_context(|| format!("rename {}", part.display()))?;
+    Ok(PathBuf::from(INSTALLER_COPY))
 }
 
 /// OVMF's code and variables: beside the OpenCore image (OSX-KVM keeps them in its root, ULTMOS
@@ -987,6 +1054,29 @@ mod tests {
         assert_eq!(
             relocated(d.join("OpenCore.qcow2"), &d),
             d.join("OpenCore.qcow2")
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_dmg_is_known_by_its_udif_trailer() {
+        let d = std::env::temp_dir().join(format!("reims-ctl-dmg-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let mut udif = vec![0u8; 4096];
+        udif[4096 - 512..4096 - 508].copy_from_slice(b"koly");
+        std::fs::write(d.join("udzo.dmg"), &udif).unwrap();
+        // A read/write DMG is a raw image, which ends in the backup GPT header.
+        let mut raw = vec![0u8; 4096];
+        raw[4096 - 512..4096 - 504].copy_from_slice(b"EFI PART");
+        std::fs::write(d.join("udrw.dmg"), &raw).unwrap();
+        std::fs::write(d.join("short.dmg"), b"koly").unwrap();
+        assert!(is_dmg(&d.join("udzo.dmg")).unwrap());
+        assert!(!is_dmg(&d.join("udrw.dmg")).unwrap());
+        assert!(!is_dmg(&d.join("short.dmg")).unwrap());
+        // One that is not is used in place, without qemu-img.
+        assert_eq!(
+            installer_media(&d.join("udrw.dmg"), &d, &mut |_| {}).unwrap(),
+            d.join("udrw.dmg")
         );
         std::fs::remove_dir_all(&d).unwrap();
     }

@@ -118,7 +118,7 @@ pub fn preflight(vm: &Vm, host: Host) -> Result<()> {
             need(&vm.path(&q.firmware_code), "the firmware")?;
             need(&vm.path(&q.firmware_vars), "the firmware variables")?;
             if let Some(i) = &q.installer {
-                need(i, "the installer")?;
+                need(&vm.path(i), "the installer")?;
             }
         }
         Profile::VmappleArm64 => {

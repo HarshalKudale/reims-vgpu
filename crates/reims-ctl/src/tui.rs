@@ -852,7 +852,7 @@ impl App {
                         .show_if("disk_kind", &["existing", "script"]),
                     Field::path("opencore", "OpenCore image", "", "The OpenCore image to copy (OpenCore.qcow2 from OSX-KVM or ULTMOS, with its config.plist). Empty to take the launch script's.")
                         .placeholder("required unless the launch script names one"),
-                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk). Eject it once macOS is installed (i).")
+                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk, and BaseSystem.dmg too, converted to a raw image in the VM's directory). Eject it once macOS is installed (i).")
                         .placeholder("optional"),
                 ]);
             }
@@ -1028,7 +1028,7 @@ impl App {
         let cur = q
             .installer
             .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| vm.path(p).to_string_lossy().into_owned())
             .unwrap_or_default();
         let live = if runtime::running(&vm) {
             " A disc changes at once in the running VM's CD drive."
@@ -1041,7 +1041,7 @@ impl App {
                 "Installer image",
                 &cur,
                 &format!(
-                    "An .iso (CD) or BaseSystem.img (disk) (Tab completes). Empty to eject.{live}"
+                    "An .iso (CD), or BaseSystem.img or .dmg (disk; a DMG is converted to a raw image in the VM's directory) (Tab completes). Empty to eject.{live}"
                 ),
             )
             .placeholder("none (ejected)"),
@@ -1086,9 +1086,11 @@ impl App {
                 let mut vm = Registry::load()?.open(name)?;
                 let t = f.text("installer");
                 let path = (!t.is_empty()).then(|| paths::absolute(&t));
-                let s = set_installer(&mut vm, path)?;
-                self.say(&s, Level::Ok);
-                self.reload()
+                // A DMG takes seconds to convert.
+                self.spawn(name, "changing the installer", move |p| {
+                    set_installer(&mut vm, path, p)
+                });
+                Ok(())
             }
         }
     }
