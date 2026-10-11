@@ -507,9 +507,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') if n > 0 => self
                 .table
                 .select(Some(self.table.selected().unwrap_or(0).saturating_sub(1))),
-            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => {
-                self.overlay = Some(self.help())
-            }
+            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => self.overlay = Some(help()),
             KeyCode::Char('n') => self.open_create(),
             KeyCode::Char('s') | KeyCode::Enter => self.start(),
             KeyCode::Char('x') => self.stop(false),
@@ -572,7 +570,7 @@ impl App {
             self.say(&format!("{} is already running", vm.name()), Level::Info);
             return;
         }
-        // What runtime::warnings finds shows in the help, not here.
+        // What runtime::warnings finds shows in the VM's details, not here.
         let host = self.host;
         self.spawn(&vm.config.name.clone(), "starting", move |_| {
             let pid = runtime::start(&vm, host)?;
@@ -1358,15 +1356,23 @@ impl App {
                     Line::from(Span::styled(e.clone(), Style::new().fg(Color::Red))),
                     Line::from(format!("directory {}", paths::tilde(&r.dir))),
                 ],
-                Ok(vm) => describe(vm, self.host)
-                    .into_iter()
-                    .map(|(k, v)| {
-                        Line::from(vec![
-                            Span::styled(format!("{k:<13} "), Style::new().dim()),
-                            Span::raw(v),
-                        ])
-                    })
-                    .collect(),
+                Ok(vm) => {
+                    let mut lines: Vec<Line> = describe(vm, self.host)
+                        .into_iter()
+                        .map(|(k, v)| {
+                            Line::from(vec![
+                                Span::styled(format!("{k:<13} "), Style::new().dim()),
+                                Span::raw(v),
+                            ])
+                        })
+                        .collect();
+                    // Below its settings, what starting it warns of on this host.
+                    for w in runtime::warnings(vm, self.host) {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(w, Style::new().fg(Color::Yellow))));
+                    }
+                    lines
+                }
             },
         };
         f.render_widget(
@@ -1391,27 +1397,6 @@ impl App {
             Paragraph::new(Span::styled(format!(" {s}"), style)).wrap(Wrap { trim: true }),
             area,
         );
-    }
-
-    /// The keys, and what starting the selected VM warns of on this host.
-    fn help(&self) -> Overlay {
-        let mut lines: Vec<String> = HELP.lines().map(String::from).collect();
-        if let Some(Ok(vm)) = self.selected().map(|r| &r.vm) {
-            let warnings = runtime::warnings(vm, self.host);
-            if !warnings.is_empty() {
-                lines.push(String::new());
-                lines.push(format!("Before you start {}:", vm.name()));
-                for w in warnings {
-                    lines.extend(wrap_words(&w, 88).into_iter().map(|l| format!("  {l}")));
-                }
-            }
-        }
-        Overlay::Text {
-            title: "help  (Esc close)".into(),
-            lines,
-            scroll: 0,
-            kind: TextKind::Help,
-        }
     }
 }
 
@@ -1643,24 +1628,13 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
 
 The same from a shell: reims-ctl help.";
 
-/// `s` cut at its spaces into lines of at most `width` characters; a longer word takes a line
-/// of its own.
-fn wrap_words(s: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in s.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
+fn help() -> Overlay {
+    Overlay::Text {
+        title: "help  (Esc close)".into(),
+        lines: HELP.lines().map(String::from).collect(),
+        scroll: 0,
+        kind: TextKind::Help,
     }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
 }
 
 /// The columns and rows of a text view's text: the whole screen below its title row, with no
@@ -1764,13 +1738,6 @@ mod tests {
         let lines = vec!["abcdef".to_string(), String::new(), "ééé".to_string()];
         assert_eq!(wrap_rows(&lines, 3), ["abc", "def", "", "ééé"]);
         assert_eq!(wrap_rows(&lines, 2), ["ab", "cd", "ef", "", "éé", "é"]);
-    }
-
-    #[test]
-    fn wrap_words_cuts_at_spaces() {
-        assert_eq!(wrap_words("ab cd  ef", 5), ["ab cd", "ef"]);
-        assert_eq!(wrap_words("abcdefg hi", 5), ["abcdefg", "hi"]);
-        assert!(wrap_words("", 5).is_empty());
     }
 
     #[test]
