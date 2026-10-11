@@ -207,6 +207,17 @@ impl Form {
         }
     }
 
+    pub fn set_help(&mut self, key: &str, help: &str) {
+        if let Some(f) = self.fields.iter_mut().find(|f| f.key == key) {
+            f.help = help.into();
+        }
+    }
+
+    #[cfg(test)]
+    pub fn help(&self, key: &str) -> &str {
+        self.field(key).map(|f| f.help.as_str()).unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub fn focused_key(&self) -> &'static str {
         self.fields[self.focus].key

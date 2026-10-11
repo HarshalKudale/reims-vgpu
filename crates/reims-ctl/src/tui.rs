@@ -11,12 +11,14 @@ use crate::form::{self, Field, Form, opts};
 use crate::gpu::GpuInfo;
 use crate::host::{Host, Os, Profile};
 use crate::update::Channel;
-use crate::vm::{Registry, Vm, format_mib, parse_size_mib};
+use crate::vm::{Registry, Vm, format_mib, parse_resolution, parse_size_mib};
 use crate::{install, logs, paths, runtime, update};
 use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -83,7 +85,6 @@ enum Overlay {
 enum FormKind {
     Create,
     Edit(String),
-    Installer(String),
 }
 
 #[derive(Clone)]
@@ -127,6 +128,8 @@ struct App {
     update_requested: bool,
     update_channel: Option<Channel>,
     pending_select: Option<String>,
+    /// A VM's logs for the run loop to show in less, which needs the terminal.
+    pending_page: Option<(String, Vec<PathBuf>)>,
 }
 
 impl App {
@@ -157,6 +160,7 @@ impl App {
             update_requested: false,
             update_channel: None,
             pending_select: None,
+            pending_page: None,
         };
         app.reload()?;
         if !app.rows.is_empty() {
@@ -275,6 +279,9 @@ impl App {
             {
                 self.key(k);
             }
+            if let Some((vm, files)) = self.pending_page.take() {
+                self.page(terminal, &vm, &files)?;
+            }
             while let Ok(m) = self.rx.try_recv() {
                 self.message(m);
             }
@@ -283,6 +290,22 @@ impl App {
             } else if self.last_state.elapsed() > Duration::from_secs(1) {
                 self.refresh_state();
             }
+        }
+        Ok(())
+    }
+
+    /// Shows a VM's logs in less, on the plain terminal: its own selection then copies their
+    /// text, a long line whole. Without less, the QEMU log shows in a view of reims-ctl's own.
+    fn page(&mut self, terminal: &mut DefaultTerminal, vm: &str, files: &[PathBuf]) -> Result<()> {
+        ratatui::restore();
+        let status = run_less(files);
+        enable_raw_mode()?;
+        execute!(std::io::stdout(), EnterAlternateScreen)?;
+        terminal.clear()?;
+        match status {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.open_log(vm, false),
+            Err(e) => self.say(&format!("less: {e}"), Level::Error),
         }
         Ok(())
     }
@@ -323,7 +346,10 @@ impl App {
         }
         match self.overlay.take() {
             Some(Overlay::Form(kind, mut f)) => match f.handle_key(k) {
-                form::Event::None => self.overlay = Some(Overlay::Form(kind, f)),
+                form::Event::None => {
+                    display_help(&mut f);
+                    self.overlay = Some(Overlay::Form(kind, f))
+                }
                 form::Event::Cancel => {}
                 form::Event::Submit => match self.submit(&kind, &f) {
                     Ok(()) => {}
@@ -490,14 +516,9 @@ impl App {
             KeyCode::Char('x') => self.stop(false),
             KeyCode::Char('K') => self.ask_force_stop(),
             KeyCode::Char('e') => self.open_edit(),
-            KeyCode::Char('i') => self.open_installer(),
             KeyCode::Char('c') => self.show_command(),
             KeyCode::Char('l') => self.toggle_logs(),
-            KeyCode::Char('L') => {
-                if let Some(name) = self.selected_name() {
-                    self.open_log(&name, false);
-                }
-            }
+            KeyCode::Char('L') => self.view_logs(),
             KeyCode::Char('b') => self.report(),
             KeyCode::Char('d') | KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('u') => self.ask_update(),
@@ -552,15 +573,14 @@ impl App {
             self.say(&format!("{} is already running", vm.name()), Level::Info);
             return;
         }
+        // What runtime::warnings finds shows in the VM's details, not here.
         let host = self.host;
-        let warnings = runtime::warnings(&vm, host);
         self.spawn(&vm.config.name.clone(), "starting", move |_| {
             let pid = runtime::start(&vm, host)?;
-            let mut s = format!("{}: running (pid {pid}); its window is open", vm.name());
-            for w in warnings {
-                s.push_str(&format!(" · warning: {w}"));
-            }
-            Ok(s)
+            Ok(format!(
+                "{}: running (pid {pid}); its window is open",
+                vm.name()
+            ))
         });
     }
 
@@ -744,6 +764,24 @@ impl App {
         }
     }
 
+    /// The selected VM's QEMU log, then its serial console, for the run loop to show in less.
+    fn view_logs(&mut self) {
+        let Some(vm) = self.selected_vm() else { return };
+        let files: Vec<PathBuf> = [vm.qemu_log(), vm.serial_log()]
+            .into_iter()
+            .filter(|f| f.exists())
+            .collect();
+        if files.is_empty() {
+            let p = paths::tilde(&vm.qemu_log());
+            self.say(
+                &format!("{}: {p} does not exist yet", vm.name()),
+                Level::Info,
+            );
+            return;
+        }
+        self.pending_page = Some((vm.config.name.clone(), files));
+    }
+
     fn open_log(&mut self, name: &str, serial: bool) {
         let Some(vm) = self
             .rows
@@ -852,7 +890,7 @@ impl App {
                         .show_if("disk_kind", &["existing", "script"]),
                     Field::path("opencore", "OpenCore image", "", "The OpenCore image to copy (OpenCore.qcow2 from OSX-KVM or ULTMOS, with its config.plist). Empty to take the launch script's.")
                         .placeholder("required unless the launch script names one"),
-                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk, and BaseSystem.dmg too, converted to a raw image in the VM's directory). Eject it once macOS is installed (i).")
+                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk, and BaseSystem.dmg too, converted to a raw image in the VM's directory). Eject it once macOS is installed (e).")
                         .placeholder("optional"),
                 ]);
             }
@@ -867,16 +905,31 @@ impl App {
             }
         }
         fields.extend([
-            Field::text("displays", "Displays", "1", "1 to 8, each in a window of its own."),
-            Field::text("resolution", "Resolution", "1920x1080", "The guest's first mode: WIDTHxHEIGHT, or host for the host screen's own modes and density."),
-            Field::toggle("hidpi", "HiDPI", false, "Run the mode at twice the density: 3840x2160 looks like 1920x1080. Needs a width of at least 1920."),
-            Field::toggle("logs", "Logs", false, "Keep the library's log and the serial console, for bug reports."),
-            Field::text("ssh_port", "SSH port", "", "Optional: a port on 127.0.0.1 forwarded to the guest's SSH (Remote Login).").placeholder("optional"),
+            Field::text(
+                "displays",
+                "Displays",
+                "1",
+                "1 to 8, each in a window of its own.",
+            ),
+            Field::text("resolution", "Resolution", "1920x1080", RESOLUTION_HELP),
+            Field::toggle("hidpi", "HiDPI", false, HIDPI_HELP),
+            Field::toggle(
+                "logs",
+                "Logs",
+                false,
+                "Keep the library's log and the serial console, for bug reports.",
+            ),
+            Field::text(
+                "ssh_port",
+                "SSH port",
+                "",
+                "Optional: a port on 127.0.0.1 forwarded to the guest's SSH (Remote Login).",
+            )
+            .placeholder("optional"),
         ]);
-        self.overlay = Some(Overlay::Form(
-            FormKind::Create,
-            Form::new("New VM", "create", fields),
-        ));
+        let mut form = Form::new("New VM", "create", fields);
+        display_help(&mut form);
+        self.overlay = Some(Overlay::Form(FormKind::Create, form));
     }
 
     fn open_edit(&mut self) {
@@ -900,14 +953,9 @@ impl App {
                 "resolution",
                 "Resolution",
                 &c.display.resolution,
-                "WIDTHxHEIGHT, or host for the host screen's own modes and density.",
+                RESOLUTION_HELP,
             ),
-            Field::toggle(
-                "hidpi",
-                "HiDPI",
-                c.display.hidpi,
-                "Twice the density: 3840x2160 looks like 1920x1080. Needs a width of at least 1920.",
-            ),
+            Field::toggle("hidpi", "HiDPI", c.display.hidpi, HIDPI_HELP),
             Field::toggle(
                 "borderless",
                 "Borderless",
@@ -970,7 +1018,21 @@ impl App {
             ),
         ]);
         if let Some(q) = &c.q35 {
+            let live = if runtime::running(&vm) {
+                " A disc changes at once in the running VM's CD drive."
+            } else {
+                ""
+            };
             fields.extend([
+                Field::path(
+                    "installer",
+                    "Installer image",
+                    &installer_shown(&vm),
+                    &format!(
+                        "An .iso (CD), or BaseSystem.img or .dmg (disk; a DMG is converted to a raw image in the VM's directory) (Tab completes). Empty to eject.{live}"
+                    ),
+                )
+                .placeholder("none (ejected)"),
                 Field::text("cpu_model", "CPU model", &q.cpu_model, "QEMU's -cpu model."),
                 Field::text(
                     "cpu_flags",
@@ -1013,43 +1075,9 @@ impl App {
         } else {
             ""
         };
-        self.overlay = Some(Overlay::Form(
-            FormKind::Edit(c.name.clone()),
-            Form::new(&format!("Edit {}{note}", c.name), "save", fields),
-        ));
-    }
-
-    fn open_installer(&mut self) {
-        let Some(vm) = self.selected_vm() else { return };
-        let Some(q) = &vm.config.q35 else {
-            self.say("only x86-64 VMs take installer media", Level::Info);
-            return;
-        };
-        let cur = q
-            .installer
-            .as_ref()
-            .map(|p| vm.path(p).to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let live = if runtime::running(&vm) {
-            " A disc changes at once in the running VM's CD drive."
-        } else {
-            ""
-        };
-        let fields = vec![
-            Field::path(
-                "installer",
-                "Installer image",
-                &cur,
-                &format!(
-                    "An .iso (CD), or BaseSystem.img or .dmg (disk; a DMG is converted to a raw image in the VM's directory) (Tab completes). Empty to eject.{live}"
-                ),
-            )
-            .placeholder("none (ejected)"),
-        ];
-        self.overlay = Some(Overlay::Form(
-            FormKind::Installer(vm.config.name.clone()),
-            Form::new(&format!("{}: installer", vm.config.name), "save", fields),
-        ));
+        let mut form = Form::new(&format!("Edit {}{note}", c.name), "save", fields);
+        display_help(&mut form);
+        self.overlay = Some(Overlay::Form(FormKind::Edit(c.name.clone()), form));
     }
 
     fn submit(&mut self, kind: &FormKind, f: &Form) -> Result<()> {
@@ -1072,6 +1100,12 @@ impl App {
             }
             FormKind::Edit(name) => {
                 let mut vm = Registry::load()?.open(name)?;
+                let installer = installer_change(&vm, f)?;
+                if installer.is_some()
+                    && let Some(a) = self.activity.get(name)
+                {
+                    bail!("{name} is busy: {a}");
+                }
                 apply_edit(&mut vm, f, self.gpus.as_deref())?;
                 vm.save()?;
                 let note = if runtime::running(&vm) {
@@ -1080,16 +1114,14 @@ impl App {
                     ""
                 };
                 self.say(&format!("{name}: saved{note}"), Level::Ok);
-                self.reload()
-            }
-            FormKind::Installer(name) => {
-                let mut vm = Registry::load()?.open(name)?;
-                let t = f.text("installer");
-                let path = (!t.is_empty()).then(|| paths::absolute(&t));
-                // A DMG takes seconds to convert.
-                self.spawn(name, "changing the installer", move |p| {
-                    set_installer(&mut vm, path, p)
-                });
+                self.reload()?;
+                // After the rest is saved: a DMG takes seconds to convert, and a running VM's
+                // CD drive changes at once.
+                if let Some(path) = installer {
+                    self.spawn(name, "changing the installer", move |p| {
+                        set_installer(&mut vm, path, p)
+                    });
+                }
                 Ok(())
             }
         }
@@ -1188,11 +1220,19 @@ impl App {
             self.pending_select = None;
         }
         let area = f.area();
+        let width = area.width as usize;
+        // A row each, unless the status or the hints are wider than the terminal.
+        let status_rows = match &self.status {
+            Some((s, _)) if s.chars().count() + 1 > width => 2,
+            _ => 1,
+        };
+        let hints = key_hints();
+        let hint_rows = if hints.width() > width { 2 } else { 1 };
         let [header, body, status, keys] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(2),
-            Constraint::Length(2),
+            Constraint::Length(status_rows),
+            Constraint::Length(hint_rows),
         ])
         .areas(area);
         self.draw_header(f, header);
@@ -1210,7 +1250,7 @@ impl App {
             self.draw_detail(f, detail);
         }
         self.draw_status(f, status);
-        self.draw_keys(f, keys);
+        f.render_widget(Paragraph::new(hints).wrap(Wrap { trim: false }), keys);
         match &self.overlay {
             Some(Overlay::Form(_, form)) => form.render(f, area),
             Some(Overlay::Text {
@@ -1328,15 +1368,23 @@ impl App {
                     Line::from(Span::styled(e.clone(), Style::new().fg(Color::Red))),
                     Line::from(format!("directory {}", paths::tilde(&r.dir))),
                 ],
-                Ok(vm) => describe(vm, self.host)
-                    .into_iter()
-                    .map(|(k, v)| {
-                        Line::from(vec![
-                            Span::styled(format!("{k:<13} "), Style::new().dim()),
-                            Span::raw(v),
-                        ])
-                    })
-                    .collect(),
+                Ok(vm) => {
+                    let mut lines: Vec<Line> = describe(vm, self.host)
+                        .into_iter()
+                        .map(|(k, v)| {
+                            Line::from(vec![
+                                Span::styled(format!("{k:<13} "), Style::new().dim()),
+                                Span::raw(v),
+                            ])
+                        })
+                        .collect();
+                    // Below its settings, what starting it warns of on this host.
+                    for w in runtime::warnings(vm, self.host) {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(w, Style::new().fg(Color::Yellow))));
+                    }
+                    lines
+                }
             },
         };
         f.render_widget(
@@ -1362,41 +1410,32 @@ impl App {
             area,
         );
     }
+}
 
-    fn draw_keys(&self, f: &mut Frame, area: Rect) {
-        let keys = [
-            ("n", "new"),
-            ("s", "start"),
-            ("x", "stop"),
-            ("K", "power off"),
-            ("e", "edit"),
-            ("i", "installer"),
-            ("c", "command"),
-            ("l", "logs on/off"),
-            ("L", "view log"),
-            ("b", "bug report"),
-            ("d", "delete"),
-            ("u", "update"),
-            ("?", "help"),
-            ("q", "quit"),
-        ];
-        // Non-breaking spaces inside each hint, so a narrow terminal wraps between hints only.
-        let mut spans = Vec::new();
-        for (k, what) in keys {
-            spans.push(Span::styled(
-                format!("\u{a0}{k}\u{a0}"),
-                Style::new().fg(Color::Black).bg(Color::DarkGray),
-            ));
-            spans.push(Span::raw(format!(
-                "\u{a0}{}  ",
-                what.replace(' ', "\u{a0}")
-            )));
+/// The main screen's key hints: the everyday keys, and the help, which lists the rest.
+fn key_hints() -> Line<'static> {
+    let keys = [
+        ("n", "new"),
+        ("s", "start"),
+        ("x", "stop"),
+        ("K", "kill"),
+        ("d", "delete"),
+        ("u", "update"),
+        ("?", "help"),
+    ];
+    // Non-breaking spaces inside each hint, so a narrow terminal wraps between hints only.
+    let mut spans = Vec::new();
+    for (k, what) in keys {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
         }
-        f.render_widget(
-            Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-            area,
-        );
+        spans.push(Span::styled(
+            format!("\u{a0}{k}\u{a0}"),
+            Style::new().fg(Color::Black).bg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(format!("\u{a0}{what}")));
     }
+    Line::from(spans)
 }
 
 fn gpu_id(g: &crate::vm::Gpu) -> String {
@@ -1431,6 +1470,71 @@ fn gpu_from_choice(id: &str, list: &[GpuInfo]) -> crate::vm::Gpu {
         device_id: dev,
         name: None,
     }
+}
+
+const RESOLUTION_HELP: &str =
+    "The guest's first mode: WIDTHxHEIGHT, or host for the host screen's own modes and density.";
+
+const HIDPI_HELP: &str = "Run the mode at twice the density, as a Retina screen does: the desktop \
+     looks like half the mode, so a larger mode makes everything smaller (3840x2160 looks like \
+     1920x1080, 3200x1800 like 1600x900, 2560x1440 like 1280x720). Needs a mode at least 1920 \
+     pixels wide.";
+
+/// The resolution's and HiDPI's help, each ending with what the desktop looks like at the
+/// values the form holds now.
+fn display_help(f: &mut Form) {
+    if !f.is_shown("resolution") || !f.is_shown("hidpi") {
+        return;
+    }
+    let resolution = f.text("resolution");
+    let hidpi = f.toggle("hidpi");
+    let looks_like = |hidpi| {
+        crate::vm::Display {
+            resolution: resolution.clone(),
+            hidpi,
+            ..Default::default()
+        }
+        .looks_like()
+    };
+    let now = match (parse_resolution(&resolution), looks_like(true)) {
+        _ if resolution == "host" && hidpi => {
+            "host takes the host screen's own density: turn HiDPI off.".to_string()
+        }
+        (Ok(_), Some((w, h))) if hidpi => format!("Now {resolution} looks like {w}x{h}."),
+        (Ok(_), Some((w, h))) => format!("At HiDPI, {resolution} would look like {w}x{h}."),
+        (Ok((w, _)), None) if hidpi => format!("{w} pixels wide is narrower than 1920."),
+        _ => String::new(),
+    };
+    f.set_help("resolution", &format!("{RESOLUTION_HELP} {now}"));
+    f.set_help("hidpi", &format!("{HIDPI_HELP} {now}"));
+}
+
+/// The VM's installer as the edit form shows it: its full path, or empty.
+fn installer_shown(vm: &Vm) -> String {
+    vm.config
+        .q35
+        .as_ref()
+        .and_then(|q| q.installer.as_ref())
+        .map(|p| vm.path(p).to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The installer the edit form changes the VM's to, if it changes it; `Some(None)` ejects it.
+fn installer_change(vm: &Vm, f: &Form) -> Result<Option<Option<PathBuf>>> {
+    if !f.is_shown("installer") {
+        return Ok(None);
+    }
+    let t = f.text("installer");
+    if t == installer_shown(vm) {
+        return Ok(None);
+    }
+    let path = (!t.is_empty()).then(|| paths::absolute(&t));
+    if let Some(p) = &path
+        && !p.is_file()
+    {
+        bail!("installer image: {} does not exist", p.display());
+    }
+    Ok(Some(path))
 }
 
 fn apply_edit(vm: &mut Vm, f: &Form, gpus: Option<&[GpuInfo]>) -> Result<()> {
@@ -1487,6 +1591,36 @@ fn apply_edit(vm: &mut Vm, f: &Form, gpus: Option<&[GpuInfo]>) -> Result<()> {
     c.check()
 }
 
+/// Runs less on `files`, each at its end, as system(3) runs a command: Ctrl+C and Ctrl+\ reach
+/// the terminal's whole foreground process group, so reims-ctl ignores them until less exits,
+/// and less gets them as it would from a shell.
+fn run_less(files: &[PathBuf]) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("less");
+    cmd.arg("++G").args(files);
+    // SAFETY: only signal, which is async-signal-safe, between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    // SAFETY: dispositions set to ignore, then back to what they were.
+    let (int, quit) = unsafe {
+        (
+            libc::signal(libc::SIGINT, libc::SIG_IGN),
+            libc::signal(libc::SIGQUIT, libc::SIG_IGN),
+        )
+    };
+    let status = cmd.status();
+    unsafe {
+        libc::signal(libc::SIGINT, int);
+        libc::signal(libc::SIGQUIT, quit);
+    }
+    status
+}
+
 fn copy_to_clipboard(s: &str) -> Option<&'static str> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1516,8 +1650,7 @@ fn copy_to_clipboard(s: &str) -> Option<&'static str> {
     None
 }
 
-fn help() -> Overlay {
-    let text = "\
+const HELP: &str = "\
 reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in windows of their own.
 
   ↑ ↓ / j k   choose a VM
@@ -1525,45 +1658,45 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
   s / Enter   start it
   x           stop it: the guest is asked to shut down, and powered off if it has not
               when its shutdown timeout ends (edit e to change it)
-  K           power it off at once
+  K           kill it: power it off at once
   e           edit its settings: CPUs, memory, displays, resolution, HiDPI, borderless,
-              GPU, audio, network, logs, extra QEMU arguments (they apply at its next start)
-  i           change or eject its installer image (x86-64); a CD changes in a running VM
+              GPU, audio, network, logs, extra QEMU arguments (they apply at its next start),
+              and its installer image (x86-64), a CD of which changes at once in a running VM
   c           show the QEMU command it runs, to write as launch.sh (w) or copy (y):
               run it yourself, without reims-ctl
   l           turn its logs on or off
-  L           view its QEMU log (s for the serial console)
+  L           view its QEMU log in less: :n shows the serial console, / searches,
+              F follows the log as it grows, q comes back
   b           write a bug report: its logs, settings, command and this host's details,
               zipped into your Downloads folder
   d           delete it
   u           update reims-ctl and QEMU from your reims-vgpu checkout
   r           reload the list
+  ?           this help
   q           quit; running VMs keep running
 
 The same from a shell: reims-ctl help.";
+
+fn help() -> Overlay {
     Overlay::Text {
         title: "help  (Esc close)".into(),
-        lines: text.lines().map(String::from).collect(),
+        lines: HELP.lines().map(String::from).collect(),
         scroll: 0,
         kind: TextKind::Help,
     }
 }
 
-fn text_popup(area: Rect) -> Rect {
-    area.centered(Constraint::Percentage(92), Constraint::Percentage(88))
-}
-
-/// The columns and rows inside the text overlay's border.
+/// The columns and rows of a text view's text: the whole screen below its title row, with no
+/// border or margin beside the text, so the terminal's selection copies the text alone.
 fn text_inner(area: Rect) -> (usize, usize) {
-    let p = text_popup(area);
     (
-        p.width.saturating_sub(2).max(1) as usize,
-        p.height.saturating_sub(2) as usize,
+        area.width.max(1) as usize,
+        area.height.saturating_sub(1) as usize,
     )
 }
 
 /// `lines` cut into rows of at most `width` characters, so a long line (a command's drive
-/// paths, a log's message) shows whole rather than past the overlay's edge.
+/// paths, a log's message) shows whole rather than past the screen's edge.
 fn wrap_rows(lines: &[String], width: usize) -> Vec<&str> {
     let mut rows = Vec::new();
     for l in lines {
@@ -1585,11 +1718,12 @@ fn wrap_rows(lines: &[String], width: usize) -> Vec<&str> {
 }
 
 fn draw_text(f: &mut Frame, area: Rect, title: &str, lines: &[String], scroll: usize) {
-    let popup = text_popup(area);
-    f.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(format!(" {title} "))
-        .border_style(Style::new().fg(Color::Cyan));
+    f.render_widget(Clear, area);
+    let [top, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(
+        Paragraph::new(format!(" {title}")).style(Style::new().fg(Color::Black).bg(Color::Cyan)),
+        top,
+    );
     let (width, height) = text_inner(area);
     let rows = wrap_rows(lines, width);
     let start = scroll.min(rows.len().saturating_sub(height));
@@ -1599,7 +1733,7 @@ fn draw_text(f: &mut Frame, area: Rect, title: &str, lines: &[String], scroll: u
         .take(height)
         .map(Line::from)
         .collect();
-    f.render_widget(Paragraph::new(shown).block(block), popup);
+    f.render_widget(Paragraph::new(shown), body);
 }
 
 fn draw_confirm(
@@ -1653,5 +1787,46 @@ mod tests {
         let lines = vec!["abcdef".to_string(), String::new(), "ééé".to_string()];
         assert_eq!(wrap_rows(&lines, 3), ["abc", "def", "", "ééé"]);
         assert_eq!(wrap_rows(&lines, 2), ["ab", "cd", "ef", "", "éé", "é"]);
+    }
+
+    #[test]
+    fn key_hints_fit_an_80_column_terminal() {
+        assert!(key_hints().width() <= 80);
+    }
+
+    #[test]
+    fn display_help_says_what_the_desktop_looks_like() {
+        let now = |resolution: &str, hidpi: bool| {
+            let mut f = Form::new(
+                "t",
+                "save",
+                vec![
+                    Field::text("resolution", "Resolution", resolution, RESOLUTION_HELP),
+                    Field::toggle("hidpi", "HiDPI", hidpi, HIDPI_HELP),
+                ],
+            );
+            display_help(&mut f);
+            assert_eq!(
+                f.help("resolution").strip_prefix(RESOLUTION_HELP),
+                f.help("hidpi").strip_prefix(HIDPI_HELP)
+            );
+            f.help("hidpi")[HIDPI_HELP.len()..].trim().to_string()
+        };
+        assert_eq!(now("3200x1800", true), "Now 3200x1800 looks like 1600x900.");
+        assert_eq!(
+            now("3840x2160", false),
+            "At HiDPI, 3840x2160 would look like 1920x1080."
+        );
+        assert_eq!(
+            now("1280x800", true),
+            "1280 pixels wide is narrower than 1920."
+        );
+        assert_eq!(now("1280x800", false), "");
+        assert_eq!(
+            now("host", true),
+            "host takes the host screen's own density: turn HiDPI off."
+        );
+        assert_eq!(now("host", false), "");
+        assert_eq!(now("19x", true), "");
     }
 }
