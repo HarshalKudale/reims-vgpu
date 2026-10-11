@@ -826,7 +826,7 @@ impl App {
         match profile {
             Profile::Q35X86_64 => {
                 fields.extend([
-                    Field::path("script", "Import a launch script", "", "Optional: an OSX-KVM or ULTMOS boot script (boot.sh, OpenCore-Boot.sh). Its disk, OpenCore image, firmware, installer, CPU and SMC key fill what you leave empty below.")
+                    Field::path("script", "Import a launch script", "", "Optional: an OSX-KVM or ULTMOS boot script (boot.sh, OpenCore-Boot.sh). Its disk, OpenCore image, firmware, installer and CPU fill what you leave empty below.")
                         .placeholder("optional"),
                     Field::choice("disk_kind", "Disk", opts(&[("new", "Create a new disk"), ("existing", "Use an existing disk image"), ("script", "The launch script's disk")]), "new", "A new, empty disk to install macOS on, or a disk that has it already."),
                     Field::text("disk_size", "Disk size", "128G", "The new disk's size; it takes only what the guest writes.").show_if("disk_kind", &["new"]),
@@ -836,8 +836,6 @@ impl App {
                     Field::path("opencore", "OpenCore image", "", "The OpenCore image to copy (OpenCore.qcow2 from OSX-KVM or ULTMOS, with its config.plist). Empty to take the launch script's.")
                         .placeholder("required unless the launch script names one"),
                     Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk). Eject it once macOS is installed (i).")
-                        .placeholder("optional"),
-                    Field::text("osk", "Apple SMC key", "", "Optional: the key isa-applesmc gives the guest. Without one, the OpenCore image must emulate the SMC (VirtualSMC).")
                         .placeholder("optional"),
                 ]);
             }
@@ -963,13 +961,6 @@ impl App {
                     &q.cpu_flags,
                     "Flags after the model's.",
                 ),
-                Field::text(
-                    "osk",
-                    "Apple SMC key",
-                    q.osk.as_deref().unwrap_or(""),
-                    "isa-applesmc's key; empty for none (VirtualSMC).",
-                )
-                .placeholder("none"),
             ]);
         }
         let extra = c
@@ -1132,8 +1123,6 @@ impl App {
                     bail!("give the OpenCore image, or a launch script that names one");
                 }
                 s.installer = opt_path("installer");
-                let osk = f.text("osk");
-                s.osk = (!osk.is_empty()).then_some(osk);
             }
             Some(Profile::VmappleArm64) => {
                 if f.choice("source") == "ipsw" {
@@ -1466,8 +1455,6 @@ fn apply_edit(vm: &mut Vm, f: &Form, gpus: Option<&[GpuInfo]>) -> Result<()> {
     if let Some(q) = &mut c.q35 {
         q.cpu_model = f.text("cpu_model");
         q.cpu_flags = f.text("cpu_flags");
-        let osk = f.text("osk");
-        q.osk = (!osk.is_empty()).then_some(osk);
     }
     c.extra_args =
         shlex::split(&f.text("extra_args")).context("extra QEMU args: unbalanced quotes")?;

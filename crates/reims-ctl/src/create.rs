@@ -4,7 +4,7 @@
 //! own copies of OVMF's halves, and a new disk or an existing one (copied, reflinked where the
 //! file system can; a qcow2 overlay over it; or used in place). An existing OSX-KVM or ULTMOS
 //! launch script can supply what it names: the disk, OpenCore image, firmware, installer, CPU
-//! model and flags, MAC and SMC key.
+//! model and flags, and MAC.
 //!
 //! An arm64 VM (`vmapple-arm64`) is one Virtualization.framework made: installed here from an
 //! IPSW (vz.rs), or imported from macosvm's or tart's directory (an APFS clone of its disk and
@@ -68,7 +68,6 @@ pub struct Spec {
     pub firmware_vars: Option<PathBuf>,
     pub cpu_model: Option<String>,
     pub cpu_flags: Option<String>,
-    pub osk: Option<String>,
     // vmapple
     pub ipsw: Option<String>,
     pub bundle: Option<PathBuf>,
@@ -98,7 +97,6 @@ impl Spec {
             firmware_vars: None,
             cpu_model: None,
             cpu_flags: None,
-            osk: None,
             ipsw: None,
             bundle: None,
             bundle_mode: ImportMode::Copy,
@@ -412,7 +410,6 @@ fn make_q35(spec: &Spec, _host: Host, dir: &Path, progress: &mut dyn FnMut(&str)
             .clone()
             .or(s.cpu_flags.clone())
             .unwrap_or_else(default_cpu_flags),
-        osk: spec.osk.clone().or(s.osk.clone()),
         disk_port: s.disk_port.unwrap_or(3),
     });
     Ok(Vm {
@@ -650,7 +647,6 @@ pub struct LaunchScript {
     pub installer: Option<PathBuf>,
     pub cpu_model: Option<String>,
     pub cpu_flags: Option<String>,
-    pub osk: Option<String>,
     pub mac: Option<String>,
     pub cpus: Option<u32>,
     pub memory_mib: Option<u64>,
@@ -706,14 +702,6 @@ impl LaunchScript {
             if p.is_absolute() { p } else { dir.join(p) }
         };
         let mut s = LaunchScript::default();
-        // osk="..." anywhere, quoted or not.
-        if let Some(i) = body.find("osk=") {
-            let rest = body[i + 4..].trim_start_matches('"');
-            let end = rest.find(['"', ',', ' ', '\n']).unwrap_or(rest.len());
-            if end > 0 {
-                s.osk = Some(rest[..end].to_string());
-            }
-        }
         // -cpu MODEL,opts.
         if let Some(i) = body.find("-cpu ") {
             let rest = body[i + 5..].trim_start();
@@ -1054,7 +1042,6 @@ args=(
             s.cpu_flags.as_deref(),
             Some("+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check")
         );
-        assert_eq!(s.osk.as_deref(), Some("the-key"));
         assert_eq!(s.mac.as_deref(), Some("00:16:cb:00:21:09"));
         assert_eq!(s.cpus, Some(16));
         assert_eq!(s.memory_mib, Some(12 * 1024));
@@ -1089,7 +1076,6 @@ args=(
         assert_eq!(s.cpu_model.as_deref(), Some("Penryn"));
         assert_eq!(s.memory_mib, Some(4096));
         assert_eq!(s.cpus, Some(8));
-        assert_eq!(s.osk.as_deref(), Some("k2"));
         assert_eq!(
             s.installer.as_deref(),
             Some(Path::new("/osx/./BaseSystem.img"))

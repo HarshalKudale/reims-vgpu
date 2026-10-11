@@ -160,8 +160,8 @@ pub struct CreateArgs {
     /// x86-64: the installer image (an .iso goes in a CD drive; BaseSystem.img as a disk)
     #[arg(long, alias = "iso", alias = "cdrom")]
     pub installer: Option<PathBuf>,
-    /// x86-64: take the disk, OpenCore, firmware, installer, CPU, MAC and SMC key from an
-    /// OSX-KVM or ULTMOS launch script
+    /// x86-64: take the disk, OpenCore, firmware, installer, CPU and MAC from an OSX-KVM or
+    /// ULTMOS launch script
     #[arg(long)]
     pub from_script: Option<PathBuf>,
     /// x86-64: OVMF's code (default: found beside the OpenCore image, or QEMU's own)
@@ -176,10 +176,6 @@ pub struct CreateArgs {
     /// x86-64: CPU flags after the model's
     #[arg(long)]
     pub cpu_flags: Option<String>,
-    /// x86-64: the SMC key isa-applesmc gives the guest; without one the OpenCore image must
-    /// emulate the SMC (VirtualSMC)
-    #[arg(long)]
-    pub osk: Option<String>,
     /// The network card's MAC
     #[arg(long)]
     pub mac: Option<String>,
@@ -274,9 +270,6 @@ pub struct SetArgs {
     pub cpu_model: Option<String>,
     #[arg(long)]
     pub cpu_flags: Option<String>,
-    /// The SMC key; empty for none
-    #[arg(long)]
-    pub osk: Option<String>,
     /// More QEMU arguments, as one shell-quoted string; empty for none
     #[arg(long, allow_hyphen_values = true)]
     pub extra_args: Option<String>,
@@ -525,7 +518,6 @@ fn create_cmd(a: CreateArgs, host: Host) -> Result<()> {
     s.firmware_vars = abs(&a.firmware_vars);
     s.cpu_model = a.cpu_model.clone();
     s.cpu_flags = a.cpu_flags.clone();
-    s.osk = a.osk.clone();
     s.mac = a.mac.clone();
     s.ipsw = a.ipsw.clone().map(|i| {
         if i == "latest" {
@@ -683,14 +675,6 @@ pub fn describe(vm: &Vm, host: Host) -> Vec<(String, String)> {
             },
         );
         add("cpu model", q.cpu_model.clone());
-        add(
-            "smc key",
-            if q.osk.is_some() {
-                "set".into()
-            } else {
-                "none (the OpenCore image's VirtualSMC)".into()
-            },
-        );
     }
     if let Some(a) = &c.vmapple {
         add("ecid", a.ecid.to_string());
@@ -838,19 +822,16 @@ fn set(a: SetArgs, host: Host) -> Result<()> {
     if let Some(t) = a.stop_timeout {
         c.stop_timeout_secs = t;
     }
-    if a.cpu_model.is_some() || a.cpu_flags.is_some() || a.osk.is_some() {
+    if a.cpu_model.is_some() || a.cpu_flags.is_some() {
         let q = c
             .q35
             .as_mut()
-            .context("--cpu-model, --cpu-flags and --osk are x86-64 settings")?;
+            .context("--cpu-model and --cpu-flags are x86-64 settings")?;
         if let Some(m) = &a.cpu_model {
             q.cpu_model = m.clone();
         }
         if let Some(f) = &a.cpu_flags {
             q.cpu_flags = f.clone();
-        }
-        if let Some(k) = &a.osk {
-            q.osk = (!k.is_empty()).then(|| k.clone());
         }
     }
     if let Some(x) = &a.extra_args {

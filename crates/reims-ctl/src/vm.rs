@@ -318,10 +318,6 @@ pub struct Q35 {
     pub cpu_model: String,
     #[serde(default = "default_cpu_flags")]
     pub cpu_flags: String,
-    /// The SMC key `isa-applesmc` gives the guest. Without one there is no `isa-applesmc`, and
-    /// the OpenCore image must emulate the SMC (VirtualSMC).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub osk: Option<String>,
     /// The AHCI port of the system disk: 3, as OSX-KVM and ULTMOS attach it. OpenCore's saved
     /// boot entry names the port.
     #[serde(default = "default_disk_port")]
@@ -682,7 +678,6 @@ mod tests {
                 installer_kind: Some(MediaKind::Disk),
                 cpu_model: default_cpu_model(),
                 cpu_flags: default_cpu_flags(),
-                osk: None,
                 disk_port: 3,
             }),
             vmapple: None,

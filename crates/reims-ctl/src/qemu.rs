@@ -15,7 +15,7 @@
 //! RAM as a shared memfd, which the library on Linux requires; the keyboard and tablet on a
 //! qemu-xhci controller, since on ICH9's EHCI the guest stops re-arming a device's interrupt
 //! transfers under GPU load and its input freezes; fixed PCI addresses (the AHCI controller at
-//! slot 2, where OpenCore's boot entries name it).
+//! slot 2, where OpenCore's boot entries name it); `isa-applesmc` with Apple's SMC key, [`OSK`].
 //!
 //! `vmapple-arm64` follows scripts/run_vmapple.sh.
 
@@ -27,6 +27,9 @@ use std::path::{Path, PathBuf};
 /// Virtualization.framework's boot ROM for vmapple machines.
 pub const AVPBOOTER: &str =
     "/System/Library/Frameworks/Virtualization.framework/Resources/AVPBooter.vmapple2.bin";
+
+/// The SMC key `isa-applesmc` gives every x86-64 guest.
+pub const OSK: &str = "ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Invocation {
@@ -139,9 +142,7 @@ fn q35(vm: &Vm, ctx: &Ctx, a: &mut Vec<String>) -> Result<()> {
         "-device",
         "pcie-root-port,bus=pcie.0,addr=0x1,slot=1,x-speed=16,x-width=32",
     ]);
-    if let Some(osk) = q.osk.as_deref().filter(|s| !s.is_empty()) {
-        push(&["-device", &format!("isa-applesmc,osk={}", opt(osk))]);
-    }
+    push(&["-device", &format!("isa-applesmc,osk={OSK}")]);
     push(&[
         "-drive",
         &format!(
@@ -455,7 +456,6 @@ mod tests {
                     installer_kind: None,
                     cpu_model: default_cpu_model(),
                     cpu_flags: default_cpu_flags(),
-                    osk: Some("key,with,commas".into()),
                     disk_port: 3,
                 }),
                 vmapple: None,
@@ -489,7 +489,7 @@ mod tests {
             ],
             &["-accel", "kvm", "-m", "12288M"],
             &["-smp", "6,sockets=1,cores=6,threads=1"],
-            &["-device", "isa-applesmc,osk=key,,with,,commas"],
+            &["-device", &format!("isa-applesmc,osk={OSK}")],
             &[
                 "-drive",
                 "if=pflash,format=raw,readonly=on,file=/vms/t/OVMF_CODE.fd",
