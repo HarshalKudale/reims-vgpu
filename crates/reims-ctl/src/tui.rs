@@ -17,6 +17,8 @@ use anyhow::{Context, Result, bail};
 use ratatui::DefaultTerminal;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -127,6 +129,8 @@ struct App {
     update_requested: bool,
     update_channel: Option<Channel>,
     pending_select: Option<String>,
+    /// A VM's logs for the run loop to show in less, which needs the terminal.
+    pending_page: Option<(String, Vec<PathBuf>)>,
 }
 
 impl App {
@@ -157,6 +161,7 @@ impl App {
             update_requested: false,
             update_channel: None,
             pending_select: None,
+            pending_page: None,
         };
         app.reload()?;
         if !app.rows.is_empty() {
@@ -275,6 +280,9 @@ impl App {
             {
                 self.key(k);
             }
+            if let Some((vm, files)) = self.pending_page.take() {
+                self.page(terminal, &vm, &files)?;
+            }
             while let Ok(m) = self.rx.try_recv() {
                 self.message(m);
             }
@@ -283,6 +291,22 @@ impl App {
             } else if self.last_state.elapsed() > Duration::from_secs(1) {
                 self.refresh_state();
             }
+        }
+        Ok(())
+    }
+
+    /// Shows a VM's logs in less, on the plain terminal: its own selection then copies their
+    /// text, a long line whole. Without less, the QEMU log shows in a view of reims-ctl's own.
+    fn page(&mut self, terminal: &mut DefaultTerminal, vm: &str, files: &[PathBuf]) -> Result<()> {
+        ratatui::restore();
+        let status = run_less(files);
+        enable_raw_mode()?;
+        execute!(std::io::stdout(), EnterAlternateScreen)?;
+        terminal.clear()?;
+        match status {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.open_log(vm, false),
+            Err(e) => self.say(&format!("less: {e}"), Level::Error),
         }
         Ok(())
     }
@@ -495,11 +519,7 @@ impl App {
             KeyCode::Char('i') => self.open_installer(),
             KeyCode::Char('c') => self.show_command(),
             KeyCode::Char('l') => self.toggle_logs(),
-            KeyCode::Char('L') => {
-                if let Some(name) = self.selected_name() {
-                    self.open_log(&name, false);
-                }
-            }
+            KeyCode::Char('L') => self.view_logs(),
             KeyCode::Char('b') => self.report(),
             KeyCode::Char('d') | KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('u') => self.ask_update(),
@@ -743,6 +763,24 @@ impl App {
             }
             Err(e) => self.say(&format!("{e:#}"), Level::Error),
         }
+    }
+
+    /// The selected VM's QEMU log, then its serial console, for the run loop to show in less.
+    fn view_logs(&mut self) {
+        let Some(vm) = self.selected_vm() else { return };
+        let files: Vec<PathBuf> = [vm.qemu_log(), vm.serial_log()]
+            .into_iter()
+            .filter(|f| f.exists())
+            .collect();
+        if files.is_empty() {
+            let p = paths::tilde(&vm.qemu_log());
+            self.say(
+                &format!("{}: {p} does not exist yet", vm.name()),
+                Level::Info,
+            );
+            return;
+        }
+        self.pending_page = Some((vm.config.name.clone(), files));
     }
 
     fn open_log(&mut self, name: &str, serial: bool) {
@@ -1508,6 +1546,36 @@ fn apply_edit(vm: &mut Vm, f: &Form, gpus: Option<&[GpuInfo]>) -> Result<()> {
     c.check()
 }
 
+/// Runs less on `files`, each at its end, as system(3) runs a command: Ctrl+C and Ctrl+\ reach
+/// the terminal's whole foreground process group, so reims-ctl ignores them until less exits,
+/// and less gets them as it would from a shell.
+fn run_less(files: &[PathBuf]) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new("less");
+    cmd.arg("++G").args(files);
+    // SAFETY: only signal, which is async-signal-safe, between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    // SAFETY: dispositions set to ignore, then back to what they were.
+    let (int, quit) = unsafe {
+        (
+            libc::signal(libc::SIGINT, libc::SIG_IGN),
+            libc::signal(libc::SIGQUIT, libc::SIG_IGN),
+        )
+    };
+    let status = cmd.status();
+    unsafe {
+        libc::signal(libc::SIGINT, int);
+        libc::signal(libc::SIGQUIT, quit);
+    }
+    status
+}
+
 fn copy_to_clipboard(s: &str) -> Option<&'static str> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1552,7 +1620,8 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
   c           show the QEMU command it runs, to write as launch.sh (w) or copy (y):
               run it yourself, without reims-ctl
   l           turn its logs on or off
-  L           view its QEMU log (s for the serial console)
+  L           view its QEMU log in less: :n shows the serial console, / searches,
+              F follows the log as it grows, q comes back
   b           write a bug report: its logs, settings, command and this host's details,
               zipped into your Downloads folder
   d           delete it
@@ -1583,21 +1652,17 @@ fn wrap_words(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn text_popup(area: Rect) -> Rect {
-    area.centered(Constraint::Percentage(92), Constraint::Percentage(88))
-}
-
-/// The columns and rows inside the text overlay's border.
+/// The columns and rows of a text view's text: the whole screen below its title row, with no
+/// border or margin beside the text, so the terminal's selection copies the text alone.
 fn text_inner(area: Rect) -> (usize, usize) {
-    let p = text_popup(area);
     (
-        p.width.saturating_sub(2).max(1) as usize,
-        p.height.saturating_sub(2) as usize,
+        area.width.max(1) as usize,
+        area.height.saturating_sub(1) as usize,
     )
 }
 
 /// `lines` cut into rows of at most `width` characters, so a long line (a command's drive
-/// paths, a log's message) shows whole rather than past the overlay's edge.
+/// paths, a log's message) shows whole rather than past the screen's edge.
 fn wrap_rows(lines: &[String], width: usize) -> Vec<&str> {
     let mut rows = Vec::new();
     for l in lines {
@@ -1619,11 +1684,12 @@ fn wrap_rows(lines: &[String], width: usize) -> Vec<&str> {
 }
 
 fn draw_text(f: &mut Frame, area: Rect, title: &str, lines: &[String], scroll: usize) {
-    let popup = text_popup(area);
-    f.render_widget(Clear, popup);
-    let block = Block::bordered()
-        .title(format!(" {title} "))
-        .border_style(Style::new().fg(Color::Cyan));
+    f.render_widget(Clear, area);
+    let [top, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(
+        Paragraph::new(format!(" {title}")).style(Style::new().fg(Color::Black).bg(Color::Cyan)),
+        top,
+    );
     let (width, height) = text_inner(area);
     let rows = wrap_rows(lines, width);
     let start = scroll.min(rows.len().saturating_sub(height));
@@ -1633,7 +1699,7 @@ fn draw_text(f: &mut Frame, area: Rect, title: &str, lines: &[String], scroll: u
         .take(height)
         .map(Line::from)
         .collect();
-    f.render_widget(Paragraph::new(shown).block(block), popup);
+    f.render_widget(Paragraph::new(shown), body);
 }
 
 fn draw_confirm(
