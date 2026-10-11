@@ -484,7 +484,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') if n > 0 => self
                 .table
                 .select(Some(self.table.selected().unwrap_or(0).saturating_sub(1))),
-            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => self.overlay = Some(help()),
+            KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::F(1) => {
+                self.overlay = Some(self.help())
+            }
             KeyCode::Char('n') => self.open_create(),
             KeyCode::Char('s') | KeyCode::Enter => self.start(),
             KeyCode::Char('x') => self.stop(false),
@@ -552,15 +554,14 @@ impl App {
             self.say(&format!("{} is already running", vm.name()), Level::Info);
             return;
         }
+        // What runtime::warnings finds shows in the help, not here.
         let host = self.host;
-        let warnings = runtime::warnings(&vm, host);
         self.spawn(&vm.config.name.clone(), "starting", move |_| {
             let pid = runtime::start(&vm, host)?;
-            let mut s = format!("{}: running (pid {pid}); its window is open", vm.name());
-            for w in warnings {
-                s.push_str(&format!(" · warning: {w}"));
-            }
-            Ok(s)
+            Ok(format!(
+                "{}: running (pid {pid}); its window is open",
+                vm.name()
+            ))
         });
     }
 
@@ -1188,11 +1189,19 @@ impl App {
             self.pending_select = None;
         }
         let area = f.area();
+        let width = area.width as usize;
+        // A row each, unless the status or the hints are wider than the terminal.
+        let status_rows = match &self.status {
+            Some((s, _)) if s.chars().count() + 1 > width => 2,
+            _ => 1,
+        };
+        let hints = key_hints();
+        let hint_rows = if hints.width() > width { 2 } else { 1 };
         let [header, body, status, keys] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(2),
-            Constraint::Length(2),
+            Constraint::Length(status_rows),
+            Constraint::Length(hint_rows),
         ])
         .areas(area);
         self.draw_header(f, header);
@@ -1210,7 +1219,7 @@ impl App {
             self.draw_detail(f, detail);
         }
         self.draw_status(f, status);
-        self.draw_keys(f, keys);
+        f.render_widget(Paragraph::new(hints).wrap(Wrap { trim: false }), keys);
         match &self.overlay {
             Some(Overlay::Form(_, form)) => form.render(f, area),
             Some(Overlay::Text {
@@ -1363,40 +1372,52 @@ impl App {
         );
     }
 
-    fn draw_keys(&self, f: &mut Frame, area: Rect) {
-        let keys = [
-            ("n", "new"),
-            ("s", "start"),
-            ("x", "stop"),
-            ("K", "power off"),
-            ("e", "edit"),
-            ("i", "installer"),
-            ("c", "command"),
-            ("l", "logs on/off"),
-            ("L", "view log"),
-            ("b", "bug report"),
-            ("d", "delete"),
-            ("u", "update"),
-            ("?", "help"),
-            ("q", "quit"),
-        ];
-        // Non-breaking spaces inside each hint, so a narrow terminal wraps between hints only.
-        let mut spans = Vec::new();
-        for (k, what) in keys {
-            spans.push(Span::styled(
-                format!("\u{a0}{k}\u{a0}"),
-                Style::new().fg(Color::Black).bg(Color::DarkGray),
-            ));
-            spans.push(Span::raw(format!(
-                "\u{a0}{}  ",
-                what.replace(' ', "\u{a0}")
-            )));
+    /// The keys, and what starting the selected VM warns of on this host.
+    fn help(&self) -> Overlay {
+        let mut lines: Vec<String> = HELP.lines().map(String::from).collect();
+        if let Some(Ok(vm)) = self.selected().map(|r| &r.vm) {
+            let warnings = runtime::warnings(vm, self.host);
+            if !warnings.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("Before you start {}:", vm.name()));
+                for w in warnings {
+                    lines.extend(wrap_words(&w, 88).into_iter().map(|l| format!("  {l}")));
+                }
+            }
         }
-        f.render_widget(
-            Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }),
-            area,
-        );
+        Overlay::Text {
+            title: "help  (Esc close)".into(),
+            lines,
+            scroll: 0,
+            kind: TextKind::Help,
+        }
     }
+}
+
+/// The main screen's key hints: the everyday keys, and the help, which lists the rest.
+fn key_hints() -> Line<'static> {
+    let keys = [
+        ("n", "new"),
+        ("s", "start"),
+        ("x", "stop"),
+        ("K", "kill"),
+        ("d", "delete"),
+        ("u", "update"),
+        ("?", "help"),
+    ];
+    // Non-breaking spaces inside each hint, so a narrow terminal wraps between hints only.
+    let mut spans = Vec::new();
+    for (k, what) in keys {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("\u{a0}{k}\u{a0}"),
+            Style::new().fg(Color::Black).bg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(format!("\u{a0}{what}")));
+    }
+    Line::from(spans)
 }
 
 fn gpu_id(g: &crate::vm::Gpu) -> String {
@@ -1516,8 +1537,7 @@ fn copy_to_clipboard(s: &str) -> Option<&'static str> {
     None
 }
 
-fn help() -> Overlay {
-    let text = "\
+const HELP: &str = "\
 reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in windows of their own.
 
   ↑ ↓ / j k   choose a VM
@@ -1525,7 +1545,7 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
   s / Enter   start it
   x           stop it: the guest is asked to shut down, and powered off if it has not
               when its shutdown timeout ends (edit e to change it)
-  K           power it off at once
+  K           kill it: power it off at once
   e           edit its settings: CPUs, memory, displays, resolution, HiDPI, borderless,
               GPU, audio, network, logs, extra QEMU arguments (they apply at its next start)
   i           change or eject its installer image (x86-64); a CD changes in a running VM
@@ -1538,15 +1558,29 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
   d           delete it
   u           update reims-ctl and QEMU from your reims-vgpu checkout
   r           reload the list
+  ?           this help
   q           quit; running VMs keep running
 
 The same from a shell: reims-ctl help.";
-    Overlay::Text {
-        title: "help  (Esc close)".into(),
-        lines: text.lines().map(String::from).collect(),
-        scroll: 0,
-        kind: TextKind::Help,
+
+/// `s` cut at its spaces into lines of at most `width` characters; a longer word takes a line
+/// of its own.
+fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
     }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn text_popup(area: Rect) -> Rect {
@@ -1653,5 +1687,17 @@ mod tests {
         let lines = vec!["abcdef".to_string(), String::new(), "ééé".to_string()];
         assert_eq!(wrap_rows(&lines, 3), ["abc", "def", "", "ééé"]);
         assert_eq!(wrap_rows(&lines, 2), ["ab", "cd", "ef", "", "éé", "é"]);
+    }
+
+    #[test]
+    fn wrap_words_cuts_at_spaces() {
+        assert_eq!(wrap_words("ab cd  ef", 5), ["ab cd", "ef"]);
+        assert_eq!(wrap_words("abcdefg hi", 5), ["abcdefg", "hi"]);
+        assert!(wrap_words("", 5).is_empty());
+    }
+
+    #[test]
+    fn key_hints_fit_an_80_column_terminal() {
+        assert!(key_hints().width() <= 80);
     }
 }
