@@ -35,6 +35,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Create a VM
+    #[command(after_help = create_examples())]
     Create(Box<CreateArgs>),
     /// Delete a VM (its directory too, unless --keep-files)
     Delete {
@@ -127,6 +128,36 @@ fn bool_arg() -> clap::Arg {
         .num_args(0..=1)
         .default_missing_value("true")
 }
+
+/// `create --help`'s examples, under a header styled as clap styles its own.
+fn create_examples() -> String {
+    let h = *clap::builder::Styles::default().get_header();
+    format!("{h}Examples:{h:#}{CREATE_EXAMPLES}")
+}
+
+const CREATE_EXAMPLES: &str = r"
+  An x86-64 guest on Linux, with OpenCore from OSX-KVM:
+
+    # A disk that already has macOS installed (copied; see --disk-mode)
+    reims-ctl create mac --opencore ~/OSX-KVM/OpenCore/OpenCore.qcow2 \
+      --disk ~/OSX-KVM/mac_hdd_ng.img
+
+    # A new 128G disk and the macOS installer; once macOS is installed,
+    # reims-ctl eject mac takes the installer out
+    reims-ctl create mac --opencore ~/OSX-KVM/OpenCore/OpenCore.qcow2 \
+      --installer ~/OSX-KVM/BaseSystem.img --start
+
+    # Everything an OSX-KVM or ULTMOS launch script names: its disk (copied),
+    # OpenCore, firmware, installer, CPU and MAC
+    reims-ctl create mac --from-script ~/OSX-KVM/OpenCore-Boot.sh
+
+  An arm64 guest on an Apple silicon Mac:
+
+    # Install the newest macOS this Mac supports, on a new 64G disk
+    reims-ctl create mac --ipsw latest --start
+
+    # A macosvm or tart VM that already has macOS installed (an APFS clone)
+    reims-ctl create mac --bundle ~/VMs/macos13";
 
 #[derive(Args)]
 pub struct CreateArgs {
