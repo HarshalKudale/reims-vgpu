@@ -85,7 +85,6 @@ enum Overlay {
 enum FormKind {
     Create,
     Edit(String),
-    Installer(String),
 }
 
 #[derive(Clone)]
@@ -516,7 +515,6 @@ impl App {
             KeyCode::Char('x') => self.stop(false),
             KeyCode::Char('K') => self.ask_force_stop(),
             KeyCode::Char('e') => self.open_edit(),
-            KeyCode::Char('i') => self.open_installer(),
             KeyCode::Char('c') => self.show_command(),
             KeyCode::Char('l') => self.toggle_logs(),
             KeyCode::Char('L') => self.view_logs(),
@@ -891,7 +889,7 @@ impl App {
                         .show_if("disk_kind", &["existing", "script"]),
                     Field::path("opencore", "OpenCore image", "", "The OpenCore image to copy (OpenCore.qcow2 from OSX-KVM or ULTMOS, with its config.plist). Empty to take the launch script's.")
                         .placeholder("required unless the launch script names one"),
-                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk, and BaseSystem.dmg too, converted to a raw image in the VM's directory). Eject it once macOS is installed (i).")
+                    Field::path("installer", "Installer image", "", "Optional: an installer to boot (an .iso goes in a CD drive; BaseSystem.img as a disk, and BaseSystem.dmg too, converted to a raw image in the VM's directory). Eject it once macOS is installed (e).")
                         .placeholder("optional"),
                 ]);
             }
@@ -1009,7 +1007,21 @@ impl App {
             ),
         ]);
         if let Some(q) = &c.q35 {
+            let live = if runtime::running(&vm) {
+                " A disc changes at once in the running VM's CD drive."
+            } else {
+                ""
+            };
             fields.extend([
+                Field::path(
+                    "installer",
+                    "Installer image",
+                    &installer_shown(&vm),
+                    &format!(
+                        "An .iso (CD), or BaseSystem.img or .dmg (disk; a DMG is converted to a raw image in the VM's directory) (Tab completes). Empty to eject.{live}"
+                    ),
+                )
+                .placeholder("none (ejected)"),
                 Field::text("cpu_model", "CPU model", &q.cpu_model, "QEMU's -cpu model."),
                 Field::text(
                     "cpu_flags",
@@ -1058,39 +1070,6 @@ impl App {
         ));
     }
 
-    fn open_installer(&mut self) {
-        let Some(vm) = self.selected_vm() else { return };
-        let Some(q) = &vm.config.q35 else {
-            self.say("only x86-64 VMs take installer media", Level::Info);
-            return;
-        };
-        let cur = q
-            .installer
-            .as_ref()
-            .map(|p| vm.path(p).to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let live = if runtime::running(&vm) {
-            " A disc changes at once in the running VM's CD drive."
-        } else {
-            ""
-        };
-        let fields = vec![
-            Field::path(
-                "installer",
-                "Installer image",
-                &cur,
-                &format!(
-                    "An .iso (CD), or BaseSystem.img or .dmg (disk; a DMG is converted to a raw image in the VM's directory) (Tab completes). Empty to eject.{live}"
-                ),
-            )
-            .placeholder("none (ejected)"),
-        ];
-        self.overlay = Some(Overlay::Form(
-            FormKind::Installer(vm.config.name.clone()),
-            Form::new(&format!("{}: installer", vm.config.name), "save", fields),
-        ));
-    }
-
     fn submit(&mut self, kind: &FormKind, f: &Form) -> Result<()> {
         match kind {
             FormKind::Create => {
@@ -1111,6 +1090,12 @@ impl App {
             }
             FormKind::Edit(name) => {
                 let mut vm = Registry::load()?.open(name)?;
+                let installer = installer_change(&vm, f)?;
+                if installer.is_some()
+                    && let Some(a) = self.activity.get(name)
+                {
+                    bail!("{name} is busy: {a}");
+                }
                 apply_edit(&mut vm, f, self.gpus.as_deref())?;
                 vm.save()?;
                 let note = if runtime::running(&vm) {
@@ -1119,16 +1104,14 @@ impl App {
                     ""
                 };
                 self.say(&format!("{name}: saved{note}"), Level::Ok);
-                self.reload()
-            }
-            FormKind::Installer(name) => {
-                let mut vm = Registry::load()?.open(name)?;
-                let t = f.text("installer");
-                let path = (!t.is_empty()).then(|| paths::absolute(&t));
-                // A DMG takes seconds to convert.
-                self.spawn(name, "changing the installer", move |p| {
-                    set_installer(&mut vm, path, p)
-                });
+                self.reload()?;
+                // After the rest is saved: a DMG takes seconds to convert, and a running VM's
+                // CD drive changes at once.
+                if let Some(path) = installer {
+                    self.spawn(name, "changing the installer", move |p| {
+                        set_installer(&mut vm, path, p)
+                    });
+                }
                 Ok(())
             }
         }
@@ -1492,6 +1475,34 @@ fn gpu_from_choice(id: &str, list: &[GpuInfo]) -> crate::vm::Gpu {
     }
 }
 
+/// The VM's installer as the edit form shows it: its full path, or empty.
+fn installer_shown(vm: &Vm) -> String {
+    vm.config
+        .q35
+        .as_ref()
+        .and_then(|q| q.installer.as_ref())
+        .map(|p| vm.path(p).to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The installer the edit form changes the VM's to, if it changes it; `Some(None)` ejects it.
+fn installer_change(vm: &Vm, f: &Form) -> Result<Option<Option<PathBuf>>> {
+    if !f.is_shown("installer") {
+        return Ok(None);
+    }
+    let t = f.text("installer");
+    if t == installer_shown(vm) {
+        return Ok(None);
+    }
+    let path = (!t.is_empty()).then(|| paths::absolute(&t));
+    if let Some(p) = &path
+        && !p.is_file()
+    {
+        bail!("installer image: {} does not exist", p.display());
+    }
+    Ok(Some(path))
+}
+
 fn apply_edit(vm: &mut Vm, f: &Form, gpus: Option<&[GpuInfo]>) -> Result<()> {
     let c = &mut vm.config;
     c.cpus = f.text("cpus").parse().context("CPU cores: a number")?;
@@ -1615,8 +1626,8 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
               when its shutdown timeout ends (edit e to change it)
   K           kill it: power it off at once
   e           edit its settings: CPUs, memory, displays, resolution, HiDPI, borderless,
-              GPU, audio, network, logs, extra QEMU arguments (they apply at its next start)
-  i           change or eject its installer image (x86-64); a CD changes in a running VM
+              GPU, audio, network, logs, extra QEMU arguments (they apply at its next start),
+              and its installer image (x86-64), a CD of which changes at once in a running VM
   c           show the QEMU command it runs, to write as launch.sh (w) or copy (y):
               run it yourself, without reims-ctl
   l           turn its logs on or off
