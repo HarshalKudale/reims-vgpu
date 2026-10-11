@@ -4,7 +4,7 @@ use crate::create::{self, DiskSource, ImportMode, Spec};
 use crate::host::{Host, Profile};
 use crate::vm::{self, Registry, Vm, format_mib, parse_size_mib};
 use crate::{gpu, install, logs, paths, qemu, runtime, update};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
@@ -137,6 +137,11 @@ fn bool_arg() -> clap::Arg {
 fn create_examples() -> String {
     let h = *clap::builder::Styles::default().get_header();
     format!("{h}Examples:{h:#}{CREATE_EXAMPLES}")
+}
+
+/// `e`, followed by the examples: for a create that was not given enough to make a VM.
+fn with_create_examples(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow!("{e}\n\nExamples:{CREATE_EXAMPLES}")
 }
 
 const CREATE_EXAMPLES: &str = r"
@@ -520,7 +525,10 @@ fn create_cmd(a: CreateArgs, host: Host) -> Result<()> {
         .name
         .clone()
         .or(a.name_pos.clone())
-        .context("give the VM a name: reims-ctl create --name NAME")?;
+        .ok_or_else(|| with_create_examples("give the VM a name: reims-ctl create NAME"))?;
+    // Nothing a VM is made from: whatever create says is missing, the examples show the ways.
+    let source =
+        a.opencore.is_some() || a.from_script.is_some() || a.ipsw.is_some() || a.bundle.is_some();
     let mut s = Spec::new(&name);
     s.dir = a
         .dir
@@ -580,7 +588,13 @@ fn create_cmd(a: CreateArgs, host: Host) -> Result<()> {
     s.logs = a.logs.unwrap_or(false);
     s.audio = a.audio.unwrap_or(true);
     s.ssh_port = a.ssh_port;
-    let vm = create::create(s, host, &mut |p| println!("{name}: {p}"))?;
+    let vm = create::create(s, host, &mut |p| println!("{name}: {p}")).map_err(|e| {
+        if source {
+            e
+        } else {
+            with_create_examples(format!("{e:#}"))
+        }
+    })?;
     println!("created {name} in {}", paths::tilde(&vm.dir));
     if a.start {
         let pid = runtime::start(&vm, host)?;
