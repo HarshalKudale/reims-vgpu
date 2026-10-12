@@ -122,7 +122,12 @@ fn check(path: &str, lines: &[String]) -> Found {
             }
         }
         let callback_type = line.contains("extern \"C-unwind\" fn(");
-        if has_word(line, "extern") && !line.contains("extern crate") && !callback_type {
+        let foreign_imports = line.trim() == "unsafe extern \"system\" {";
+        if has_word(line, "extern")
+            && !line.contains("extern crate")
+            && !callback_type
+            && !foreign_imports
+        {
             found.errors.push(format!(
                 "{}: a C ABI outside the exports and the callback types",
                 at(i)
@@ -246,6 +251,14 @@ fn the_rule_refuses_what_it_is_for() {
     let f = check("good", &lines(good));
     assert!(f.errors.is_empty(), "{:?}", f.errors);
     assert_eq!(f.exports, BTreeSet::from(["rvg_x".to_owned()]));
+    assert!(
+        check(
+            "imports",
+            &lines("unsafe extern \"system\" {\n    fn GetSystemInfo();\n}\n")
+        )
+        .errors
+        .is_empty()
+    );
     for bad in [
         "#[unsafe(no_mangle)]\npub unsafe extern \"C-unwind\" fn rvg_x() {\n    ffi::export(|| {\n    })\n}\n",
         "#[unsafe(no_mangle)]\npub extern \"C\" fn rvg_x() {\n    a();\n}\n",

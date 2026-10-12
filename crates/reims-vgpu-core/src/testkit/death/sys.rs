@@ -1,11 +1,19 @@
-//! The C library calls and constants the harness uses, in one file per OS with the same names.
+//! Native mapping, termination observation and file I/O for the death harness.
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
+#[cfg_attr(target_os = "linux", path = "sys/linux.rs")]
+#[cfg_attr(target_os = "macos", path = "sys/macos.rs")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod raw;
 
-#[cfg(target_os = "linux")]
-pub use linux::*;
-#[cfg(target_os = "macos")]
-pub use macos::*;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::*;
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::*;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("the death harness supports only macOS, Linux and Windows");

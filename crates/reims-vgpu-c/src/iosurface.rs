@@ -107,10 +107,11 @@ pub unsafe extern "C" fn rvg_iosurface_device_create(
             return refuse(RVG_ERR_INVALID_ARGUMENT);
         }
         // SAFETY: the config's contract: NULL or a live map.
-        let memory_map = match unsafe { memory_map(c.memory_map, std::ptr::null()) } {
-            Ok(m) => m,
-            Err(s) => return refuse(s),
-        };
+        let memory_map =
+            match unsafe { memory_map(c.memory_map, std::ptr::null(), std::ptr::null()) } {
+                Ok(m) => m,
+                Err(s) => return refuse(s),
+            };
         let raise_interrupt = callbacks.raise_interrupt.map(|f| {
             let t = table.clone();
             let r: RaiseInterrupt = Arc::new(move |vector| {

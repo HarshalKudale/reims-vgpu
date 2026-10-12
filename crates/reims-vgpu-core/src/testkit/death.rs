@@ -12,14 +12,18 @@
 //!   writes its stderr line and calls `abort()` as production does: no panic, no `Drop`. It
 //!   then runs the body.
 //!
-//! The scratch file is mapped `MAP_SHARED` in the child and written in place, so what the
-//! child wrote before it died survives its `SIGABRT`:
+//! The scratch file is shared in the child and written in place, so what the child wrote before
+//! it died survives its abort:
 //! - an append-only trace of the ops the body and its fakes record ([`trace`], [`Child::op`]),
-//!   and a death marker a signal handler appends on the dying thread. Each record fills a
+//!   and a death marker for the dying thread. Unix signal handlers append it in the child;
+//!   on Windows the parent appends the native second-chance exception from a debug event,
+//!   which suspends every child thread (std's fast-fail abort bypasses in-process handlers).
+//!   Each record fills a
 //!   fixed slot, so a record a thread had reserved but not written when the child ended hides
 //!   none after it;
 //! - guest RAM and raw regions the body shares ([`Child::share_ram`], [`Child::share_region`]):
-//!   their pages are remapped in place onto the file, at the same addresses.
+//!   their pages are remapped in place, at the same addresses. Windows uses a separate fixed-size
+//!   file for each allocation, because a file with live mapped views cannot grow.
 //!
 //! `Died { id, op, thread }` comes from the child's stderr death line (the id), the marker's
 //! thread, and the trace's last op before the marker. When deaths race, the harness does not pair a
@@ -31,7 +35,7 @@
 //! which as in production runs on for a moment while the process is torn down, judges only the
 //! dying thread ([`After::DyingThread`]).
 //!
-//! The handlers chain to the actions they replace, on the alternate signal stack: std's
+//! The Unix handlers chain to the actions they replace, on the alternate signal stack: std's
 //! stack-overflow handler still reports an overflow and aborts, as it does without the harness.
 //!
 //! No product change: the child uses the capture's public switch, and this module is
@@ -43,16 +47,13 @@
 // test-only code, as `testkit::capture`).
 #![allow(clippy::panic, clippy::disallowed_methods)]
 
-use std::ffi::{OsString, c_char, c_int, c_void};
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::FileExt as _;
-use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::num::{ToU64, ToUsize, Truncate};
 use crate::raise::death::DeathSite;
@@ -65,7 +66,7 @@ use crate::testkit::guest_ram::{GuestRam, RawRegion};
 
 /// The environment marker: set to the full test name in the child that runs it.
 pub const ENV_CHILD: &str = "REIMS_VGPU_DEATH_CHILD";
-/// The scratch file the child maps `MAP_SHARED` (header, trace, shared RAM).
+/// The scratch file the child maps shared (header and trace; Unix shared RAM).
 pub const ENV_FILE: &str = "REIMS_VGPU_DEATH_FILE";
 
 /// How long the parent waits for the child, in real time, by default.
@@ -75,6 +76,11 @@ pub const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 pub const HANG_SETTLE: Duration = Duration::from_millis(200);
 /// The child's exit status when [`Child::hang`] judged a hang.
 pub const HANG_EXIT: i32 = 86;
+
+/// Whether the subprocess has std's native abort status (POSIX SIGABRT or Windows fast-fail).
+pub fn aborted(status: std::process::ExitStatus) -> bool {
+    sys::termination(status) == Some(sys::ABORT)
+}
 
 // The scratch file: a header page, the trace (fixed-size slots), then the shared RAM.
 const MAGIC: u64 = 0x4854_4145_4447_5652; // "RVGDEATH", little-endian
@@ -122,11 +128,12 @@ const K_ADVANCED: u8 = 5;
 const K_PANICKED: u8 = 6;
 
 mod sys;
+use sys::{FileExt as _, page_size, this_thread};
 
 // ---------------------------------------------------------------------------------------------
 // The child.
 
-/// The header and trace mapping, once this process is a child (null otherwise). The signal
+/// The header and trace mapping, once this process is a child (null otherwise). The Unix signal
 /// handler reads it, so it is a plain atomic.
 static SHARED: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -150,23 +157,6 @@ static CHILD: OnceLock<ChildState> = OnceLock::new();
 /// Whether this process is a child the harness started.
 pub fn in_child() -> bool {
     !SHARED.load(Ordering::Acquire).is_null()
-}
-
-/// The calling thread's system id and name, without allocating (the signal handler calls it).
-fn this_thread() -> (u64, [u8; NAME_MAX], usize) {
-    let tid = sys::current_thread_id();
-    let mut name = [0u8; NAME_MAX];
-    // SAFETY: `pthread_self()` is the calling thread; the call writes within the buffer given.
-    // For the calling thread it takes no lock (async-signal-safe in practice).
-    unsafe {
-        sys::pthread_getname_np(
-            sys::pthread_self(),
-            name.as_mut_ptr().cast::<c_char>(),
-            NAME_MAX,
-        );
-    }
-    let len = name.iter().position(|b| *b == 0).unwrap_or(NAME_MAX);
-    (tid, name, len)
 }
 
 /// A header field as an atomic. `off` is a constant inside the header page.
@@ -251,90 +241,6 @@ pub fn trace(op: &str) {
     }
 }
 
-/// The actions the harness's handler replaced, by signal: the handler (`SIG_DFL` is 0) and its
-/// flags. Stored before the handler is installed; the handler only reads them.
-static PREV_HANDLER: [AtomicUsize; sys::NSIG] =
-    [const { AtomicUsize::new(sys::SIG_DFL) }; sys::NSIG];
-static PREV_FLAGS: [AtomicU32; sys::NSIG] = [const { AtomicU32::new(0) }; sys::NSIG];
-
-/// The handler for the signals that end a child: it marks the death on the dying thread and
-/// leaves the signal to do what it would have done without the harness.
-///
-/// - With no earlier handler (`SIG_DFL`), it appends the death marker, restores the default
-///   action and re-raises: the process dies of the signal when the handler returns.
-/// - With one (std installs its stack-overflow handler for `SIGSEGV` and `SIGBUS`, on an
-///   alternate stack), it calls that handler first, as the signal would have. std's reports an
-///   overflow and aborts, so the death is marked by the `SIGABRT` it raises; for any other fault
-///   it restores the default action and returns. If it returns, the handler appends the marker
-///   and returns, and the faulting instruction runs again and ends the process.
-extern "C" fn on_fatal_signal(sig: c_int, info: *mut c_void, ctx: *mut c_void) {
-    let i = usize::try_from(sig).unwrap_or(0);
-    let prev = PREV_HANDLER
-        .get(i)
-        .map_or(sys::SIG_DFL, |h| h.load(Ordering::Acquire));
-    let flags = PREV_FLAGS.get(i).map_or(0, |f| f.load(Ordering::Acquire));
-    if prev == sys::SIG_DFL || prev == sys::SIG_IGN {
-        append_here(K_DEATH, sig.cast_unsigned(), b"");
-        let _ = set_action(sig, sys::Handler { raw: sys::SIG_DFL }, 0);
-        // `raise` pends (the signal is blocked while its handler runs) and is delivered, with
-        // the default action, when the handler returns.
-        let _ = sys::raise(sig);
-        return;
-    }
-    let chained = sys::Handler { raw: prev };
-    // SAFETY: `prev` is the handler `sigaction` reported for `sig` (neither `SIG_DFL` nor
-    // `SIG_IGN`), called the way its flags say the kernel would have called it.
-    unsafe {
-        if flags & sys::SA_SIGINFO.cast_unsigned() != 0 {
-            (chained.action)(sig, info, ctx);
-        } else {
-            (chained.handler)(sig);
-        }
-    }
-    append_here(K_DEATH, sig.cast_unsigned(), b"");
-}
-
-/// Sets `sig`'s action to `handler` (on the alternate stack, with `flags`), and returns the
-/// action it replaced.
-fn set_action(sig: c_int, handler: sys::Handler, flags: c_int) -> Option<sys::SigAction> {
-    let act = sys::SigAction::new(handler, flags | sys::SA_ONSTACK);
-    let mut old = sys::SigAction::new(sys::Handler { raw: sys::SIG_DFL }, 0);
-    // SAFETY: both structs are the C library's `struct sigaction`, and live across the call.
-    let r = unsafe { sys::sigaction(sig, &raw const act, &raw mut old) };
-    (r == 0).then_some(old)
-}
-
-/// Installs [`on_fatal_signal`] for `sig`, keeping the action it replaces for the handler to
-/// chain to. A signal the process ignores is left ignored.
-fn arm(sig: c_int) {
-    let mut cur = sys::SigAction::new(sys::Handler { raw: sys::SIG_DFL }, 0);
-    // SAFETY: a query: `act` is null and `old` is a live `struct sigaction`.
-    if unsafe { sys::sigaction(sig, std::ptr::null(), &raw mut cur) } != 0 {
-        return;
-    }
-    // SAFETY: every bit pattern of the union is a valid `usize`.
-    let raw = unsafe { cur.handler.raw };
-    if raw == sys::SIG_IGN {
-        return;
-    }
-    let i = usize::try_from(sig).unwrap_or(0);
-    if let (Some(h), Some(f)) = (PREV_HANDLER.get(i), PREV_FLAGS.get(i)) {
-        h.store(raw, Ordering::Release);
-        f.store(cur.flags.cast_unsigned(), Ordering::Release);
-    }
-    let _ = set_action(
-        sig,
-        sys::Handler {
-            action: on_fatal_signal,
-        },
-        sys::SA_SIGINFO,
-    );
-}
-
-fn page_size() -> usize {
-    usize::try_from(sys::getpagesize()).unwrap_or(0x4000)
-}
-
 /// The child's side of [`run`]: [`enter`], run `body`, [`Child::finish`]. A body that panics
 /// unwinds past `child`, whose `Drop` records it.
 fn child_main(body: impl FnOnce(&Child)) {
@@ -360,16 +266,7 @@ pub fn enter() -> Child {
     };
     // SAFETY: a fresh shared mapping of the file's first `RAM_OFF` bytes (the parent sized the
     // file), at an address the kernel picks. It is never unmapped.
-    let p = unsafe {
-        sys::mmap(
-            std::ptr::null_mut(),
-            RAM_OFF,
-            sys::PROT_READ | sys::PROT_WRITE,
-            sys::MAP_SHARED,
-            file.as_raw_fd(),
-            0,
-        )
-    };
+    let p = sys::map(&file, RAM_OFF);
     if p.addr() == usize::MAX || p.is_null() {
         panic!("death harness: cannot map {}", path.display());
     }
@@ -391,16 +288,7 @@ pub fn enter() -> Child {
     }
     SHARED.store(base, Ordering::Release);
     set_capture_enabled(false);
-    sys::widen_alternate_stack();
-    for sig in [
-        sys::SIGABRT,
-        sys::SIGTRAP,
-        sys::SIGILL,
-        sys::SIGSEGV,
-        sys::SIGBUS,
-    ] {
-        arm(sig);
-    }
+    sys::arm_handlers();
     let (tid, _, _) = this_thread();
     header_u64(base, H_BODY_TID).store(tid, Ordering::Release);
     header_u32(base, H_STATE).store(STATE_STARTED, Ordering::Release);
@@ -498,32 +386,11 @@ impl Child {
             let span = end.wrapping_sub(start);
             let off = a.next;
             a.next = off.saturating_add(span.to_u64());
-            if let Err(e) = st.file.set_len(a.next) {
-                panic!("death harness: cannot grow the file: {e}");
-            }
             let first = std::ptr::with_exposed_provenance::<u8>(start);
-            // SAFETY: `start..end` are whole pages that hold the region, so they are mapped;
-            // the copy keeps the bytes of any neighbouring allocation in those pages too, which
-            // the remap below must not lose.
-            let now = unsafe { std::slice::from_raw_parts(first, span) };
-            if let Err(e) = st.file.write_all_at(now, off) {
-                panic!("death harness: cannot copy the region: {e}");
-            }
-            // SAFETY: replaces those same pages, at the same address, with a shared mapping of
-            // the copy; every pointer into them stays valid and sees the same bytes.
-            let p = unsafe {
-                sys::mmap(
-                    std::ptr::with_exposed_provenance_mut::<c_void>(start),
-                    span,
-                    sys::PROT_READ | sys::PROT_WRITE,
-                    sys::MAP_SHARED | sys::MAP_FIXED,
-                    st.file.as_raw_fd(),
-                    off.cast_signed(),
-                )
-            };
-            if p.addr() != start {
-                panic!("death harness: cannot remap {start:#x}+{span:#x}");
-            }
+            // SAFETY: these whole pages belong to the region; no other thread touches them yet.
+            let now = unsafe { std::slice::from_raw_parts(first, span) }.to_vec();
+            // SAFETY: replaces the region's pages in place, preserving their contents.
+            unsafe { sys::remap(&st.file, start, span, off, &now) };
             a.spans.push((start, end, off));
             off
         };
@@ -594,7 +461,7 @@ impl Child {
             append(K_HUNG, 0, (tid.load(Ordering::Acquire), b"hang-body"), b"");
             header_u32(base, H_STATE).store(STATE_HUNG, Ordering::Release);
         }
-        sys::_exit(HANG_EXIT)
+        sys::exit(HANG_EXIT)
     }
 }
 
@@ -718,8 +585,10 @@ pub struct Died {
     /// The thread that died: the one the first death marker names, which the signal hit
     /// (unknown, tid 0, with no death marker).
     pub thread: ThreadTag,
-    /// The signal that ended the child.
+    /// The POSIX signal that ended the child, or 0 on Windows.
     pub signal: i32,
+    /// The native exit code, including a Windows exception status; None for a POSIX signal.
+    pub exit_code: Option<i32>,
 }
 
 /// Where the child hung.
@@ -757,7 +626,7 @@ pub enum Outcome {
 pub enum RecordKind {
     /// An op the body or a fake recorded.
     Op,
-    /// The death marker, with the signal.
+    /// The death marker, with its POSIX signal or native Windows exception status.
     Death(i32),
     /// The hang marker.
     Hung,
@@ -801,7 +670,17 @@ pub struct Report {
     overflowed: bool,
     dir: Vec<Entry>,
     file: File,
+    path: PathBuf,
     stderr: String,
+}
+
+impl Drop for Report {
+    fn drop(&mut self) {
+        for entry in &self.dir {
+            sys::remove_region(&self.path, entry.off);
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl Report {
@@ -1024,12 +903,6 @@ impl Report {
         }
     }
 
-    fn read_at(&self, off: u64, len: u64) -> Option<Vec<u8>> {
-        let mut v = vec![0u8; usize::try_from(len).ok()?];
-        self.file.read_exact_at(&mut v, off).ok()?;
-        Some(v)
-    }
-
     /// Guest RAM at guest-physical `pa..pa+len`, inside one range the child shared
     /// ([`Child::share_ram`]), as the child left it.
     pub fn ram(&self, pa: u64, len: u64) -> Option<Vec<u8>> {
@@ -1040,7 +913,7 @@ impl Report {
                     .checked_add(len)
                     .is_some_and(|end| end <= e.key.saturating_add(e.len))
         })?;
-        self.read_at(e.off.saturating_add(pa.wrapping_sub(e.key)), len)
+        sys::read_region(&self.file, &self.path, e.off, pa.wrapping_sub(e.key), len)
     }
 
     /// A little-endian `u32` of guest RAM.
@@ -1061,7 +934,7 @@ impl Report {
             .dir
             .iter()
             .find(|e| e.kind == DIR_TAGGED && e.tag == tag)?;
-        self.read_at(e.off, e.len)
+        sys::read_region(&self.file, &self.path, e.off, 0, e.len)
     }
 }
 
@@ -1122,6 +995,7 @@ pub fn parse_abort_lines(out: &str) -> Vec<String> {
                     .is_some_and(|s| !s.starts_with(DEATH_PREFIX) && !s.starts_with(TASK_DIED))
             }) || l.contains("fatal runtime error: ")
                 || l.contains("panic. aborting.")
+                || (l.starts_with("thread '") && l.ends_with("has overflowed its stack"))
                 || (l.contains("memory allocation of ") && l.contains(" failed"))
         })
         .map(str::to_owned)
@@ -1246,6 +1120,7 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
     let out2 = out
         .try_clone()
         .unwrap_or_else(|e| fail("cannot share the output file", e));
+    sys::configure(&mut cmd);
     let mut child = cmd
         .env(ENV_FILE, OsString::from(&path))
         .stdin(Stdio::null())
@@ -1253,28 +1128,11 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
         .stderr(Stdio::from(out2))
         .spawn()
         .unwrap_or_else(|e| fail("cannot start the child", e));
-    let started = Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) => {}
-            Err(e) => fail("cannot wait for the child", e),
-        }
-        if started.elapsed() >= opts.timeout {
-            timed_out = true;
-            let _ = child.kill();
-            break child
-                .wait()
-                .unwrap_or_else(|e| fail("cannot reap the child", e));
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let (status, timed_out, termination) = sys::wait(&mut child, &file, opts.timeout);
     let stderr = std::fs::read(&out_path)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     let _ = std::fs::remove_file(&out_path);
-    let _ = std::fs::remove_file(&path);
 
     let mut head = vec![0u8; TRACE_OFF];
     if let Err(e) = file.read_exact_at(&mut head, 0) {
@@ -1325,7 +1183,7 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
     };
     let outcome = if timed_out {
         Outcome::TimedOut
-    } else if let Some(signal) = status.signal() {
+    } else if termination.is_some() {
         let marker = records
             .iter()
             .enumerate()
@@ -1352,7 +1210,7 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
         let lines = ids.len().saturating_add(abort_lines.len());
         let raced = lines > 1
             || marked.len() > 1
-            || (lines == 1 && first_signal.is_some_and(|s| s != sys::SIGABRT));
+            || (lines == 1 && first_signal.is_some_and(|s| !sys::aborts_with_line(s)));
         Outcome::Died(Died {
             id: if raced { None } else { ids.first().cloned() },
             raced,
@@ -1360,7 +1218,8 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
             abort_lines,
             op: last_op_before(marker.map_or(records.len(), |(i, _)| i)),
             thread: marker.map_or(unknown, |(_, m)| m.thread.clone()),
-            signal,
+            signal: sys::signal(status),
+            exit_code: status.code(),
         })
     } else {
         match (status.code(), state) {
@@ -1388,6 +1247,7 @@ pub fn spawn_command(mut cmd: Command, label: &str, opts: Options) -> Report {
         overflowed: ne_u32(&head, H_OVERFLOW) != 0,
         dir,
         file,
+        path,
         stderr,
     }
 }
@@ -1539,7 +1399,7 @@ mod tests {
             let d = r.assert_died_at(SITE, "effect");
             assert!(d.thread.body, "died on the body's thread: {d:?}");
             assert!(!d.raced && d.ids.len() == 1, "{d:?}");
-            assert_eq!(d.signal, 6);
+            assert_eq!(d.exit_code.unwrap_or(d.signal), sys::ABORT);
             assert_eq!(r.ops(), ["capture=false", "effect"]);
             assert_eq!(r.ram_u32(0x1_0000_0040), Some(0xdead_beef));
         }
@@ -1745,6 +1605,33 @@ mod tests {
         );
     }
 
+    /// ExitProcess with an exception-shaped code is an ordinary exit, without a debug exception.
+    #[cfg(windows)]
+    #[test]
+    fn an_exception_shaped_exit_is_not_a_death() {
+        any(
+            "an_exception_shaped_exit_is_not_a_death",
+            CHILD_TIMEOUT,
+            |t| {
+                t.op("exiting");
+                sys::exit(sys::ABORT)
+            },
+            |r| {
+                assert_eq!(
+                    r.outcome(),
+                    &Outcome::Failed {
+                        code: Some(sys::ABORT)
+                    }
+                );
+                assert!(
+                    r.records()
+                        .iter()
+                        .all(|r| !matches!(r.kind, RecordKind::Death(_)))
+                );
+            },
+        );
+    }
+
     /// A test the filter does not reach is reported, not passed
     #[test]
     #[should_panic(expected = "ran no test")]
@@ -1830,7 +1717,7 @@ mod tests {
                 t.op("before");
                 // A marker, then an op after it on the same thread: what a dying thread that
                 // went on would leave.
-                append_here(K_DEATH, 6, b"");
+                append_here(K_DEATH, sys::ABORT.cast_unsigned(), b"");
                 t.op("after");
                 std::process::abort()
             },
@@ -1856,7 +1743,7 @@ mod tests {
             });
             t.op("dying");
             // The dying thread's marker is down; the other thread records before the kill.
-            append_here(K_DEATH, 6, b"");
+            append_here(K_DEATH, sys::ABORT.cast_unsigned(), b"");
             go.store(true, Ordering::Release);
             while !done.load(Ordering::Acquire) {
                 std::hint::spin_loop();
@@ -2063,7 +1950,7 @@ mod tests {
             .output()
             .unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.signal(), Some(6), "{err}");
+        assert_eq!(sys::termination(out.status), Some(sys::OVERFLOW), "{err}");
         assert!(err.contains("overflowed its stack"), "{err}");
     }
 
@@ -2077,7 +1964,7 @@ mod tests {
         },
         |r| {
             let d = r.died();
-            assert_eq!(d.signal, 6, "{}", r.stderr());
+            assert_eq!(d.exit_code.unwrap_or(d.signal), sys::OVERFLOW, "{}", r.stderr());
             assert!(d.thread.body, "{d:?}");
             assert_eq!(d.op.as_deref(), Some("recursing"));
             assert_eq!(d.id, None);
@@ -2086,7 +1973,7 @@ mod tests {
             assert!(!d.raced, "{d:?}");
             assert_eq!(d.abort_lines.len(), 1, "{d:?}");
             assert!(
-                d.abort_lines[0].contains("fatal runtime error: stack overflow"),
+                d.abort_lines[0].contains(sys::OVERFLOW_LINE),
                 "{d:?}"
             );
         }
@@ -2195,7 +2082,7 @@ mod tests {
                 });
                 wait_until(|| waiting.load(Ordering::Acquire));
                 t.op("first: dying");
-                append_here(K_DEATH, 6, b"");
+                append_here(K_DEATH, sys::ABORT.cast_unsigned(), b"");
                 drop(held);
                 wait_until(|| locked.load(Ordering::Acquire));
                 std::process::abort()
@@ -2277,8 +2164,7 @@ mod tests {
     /// `__builtin_trap`'s death on arm64: `SIGTRAP` on the calling thread, which ends the process
     /// and prints nothing.
     fn trap() -> ! {
-        sys::raise(sys::SIGTRAP);
-        panic!("SIGTRAP returned")
+        sys::trap()
     }
 
     death_test!(
@@ -2294,7 +2180,7 @@ mod tests {
             let d = r.died();
             assert!(d.raced, "{d:?}");
             assert_eq!(d.id, None);
-            assert_eq!(d.signal, 5);
+            assert_eq!(d.exit_code.unwrap_or(d.signal), sys::TRAP);
             assert_eq!(d.thread.name(), Some("b"));
             assert_eq!(sites(d), [("site_a", 0)]);
             assert_died_fails(r, A_SITE);
@@ -2309,7 +2195,7 @@ mod tests {
             let marked = Arc::new(AtomicBool::new(false));
             let m2 = marked.clone();
             named("a", move || {
-                append_here(K_DEATH, 6, b"");
+                append_here(K_DEATH, sys::ABORT.cast_unsigned(), b"");
                 m2.store(true, Ordering::Release);
                 park_forever()
             });
@@ -2471,7 +2357,7 @@ mod tests {
         let d = r.died();
         assert!(d.raced, "{d:?}");
         assert_eq!(d.id, None);
-        assert_eq!(d.signal, 6);
+        assert_eq!(d.exit_code.unwrap_or(d.signal), sys::ABORT);
         assert_eq!(d.thread.name(), Some("b"));
         assert_eq!(sites(d), [("site_a", 0)]);
         assert_eq!(d.abort_lines.len(), 1, "{d:?}");
@@ -2542,7 +2428,7 @@ mod tests {
             assert!(d.raced, "{d:?}");
             assert_eq!((d.id.as_ref(), d.ids.len()), (None, 0), "{d:?}");
             assert_eq!(d.abort_lines.len(), 1, "{d:?}");
-            assert_eq!(d.signal, 5);
+            assert_eq!(d.exit_code.unwrap_or(d.signal), sys::TRAP);
             assert_eq!(d.thread.name(), Some("b"));
         }
     );
