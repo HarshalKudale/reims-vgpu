@@ -3,7 +3,7 @@
 use crate::create::{self, DiskSource, ImportMode, Spec};
 use crate::host::{Host, Profile};
 use crate::vm::{self, Registry, Vm, format_mib, parse_size_mib};
-use crate::{gpu, install, logs, paths, qemu, runtime, update};
+use crate::{gpu, install, logs, paths, qemu, runtime, update, view};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
 use std::io::Write;
@@ -63,6 +63,20 @@ pub enum Cmd {
     Show { name: String },
     /// Change a VM's settings (they apply at its next start)
     Set(Box<SetArgs>),
+    /// Show a running VM's screen in this terminal, and use its keyboard and mouse from here
+    #[command(after_help = VIEW_HELP)]
+    View {
+        name: String,
+        /// The display to show, from 1
+        #[arg(long, default_value_t = 1)]
+        display: u32,
+        /// The most frames a second
+        #[arg(long, default_value_t = 15)]
+        fps: u32,
+        /// How to draw the screen (by default, the best the terminal answers it can show)
+        #[arg(long, value_enum)]
+        protocol: Option<view::Protocol>,
+    },
     /// Print the QEMU command that runs a VM, as a shell script
     Command {
         name: String,
@@ -126,6 +140,15 @@ pub enum Cmd {
         commit: String,
     },
 }
+
+const VIEW_HELP: &str = "\
+For a VM on a host with no screen, to set macOS up before it has screen sharing or remote \
+login. The screen is drawn with the terminal's graphics (kitty's, iTerm2's or sixel; half-block \
+characters where it has none), over SSH as well, and the terminal's keys, mouse and pasted text \
+go to the guest as a US keyboard's and a tablet's.
+
+Ctrl-] disconnects; the VM keeps running. Alt+key is Cmd+key. The Cmd, Opt, Ctrl and Shift \
+buttons on the top row hold that key for the next key or click.";
 
 /// `--flag`, `--flag=true`, `--flag false`.
 fn bool_arg() -> clap::Arg {
@@ -354,6 +377,22 @@ pub fn main(cli: Cli) -> Result<i32> {
         }
         Cmd::Show { name } => show(&Registry::load()?.open(&name)?, host),
         Cmd::Set(a) => set(*a, host)?,
+        Cmd::View {
+            name,
+            display,
+            fps,
+            protocol,
+        } => {
+            let vm = Registry::load()?.open(&name)?;
+            let opts = view::Options {
+                display,
+                fps,
+                protocol,
+            };
+            if let Some(m) = view::run(&vm, &opts)? {
+                println!("{m}");
+            }
+        }
         Cmd::Command { name, output } => {
             let vm = Registry::load()?.open(&name)?;
             let script =

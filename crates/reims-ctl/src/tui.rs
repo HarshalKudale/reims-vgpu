@@ -130,6 +130,8 @@ struct App {
     pending_select: Option<String>,
     /// A VM's logs for the run loop to show in less, which needs the terminal.
     pending_page: Option<(String, Vec<PathBuf>)>,
+    /// A VM for the run loop to show in the terminal viewer, which needs the terminal.
+    pending_view: Option<Vm>,
 }
 
 impl App {
@@ -161,6 +163,7 @@ impl App {
             update_channel: None,
             pending_select: None,
             pending_page: None,
+            pending_view: None,
         };
         app.reload()?;
         if !app.rows.is_empty() {
@@ -282,6 +285,9 @@ impl App {
             if let Some((vm, files)) = self.pending_page.take() {
                 self.page(terminal, &vm, &files)?;
             }
+            if let Some(vm) = self.pending_view.take() {
+                self.show_screen(terminal, &vm)?;
+            }
             while let Ok(m) = self.rx.try_recv() {
                 self.message(m);
             }
@@ -307,6 +313,22 @@ impl App {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => self.open_log(vm, false),
             Err(e) => self.say(&format!("less: {e}"), Level::Error),
         }
+        Ok(())
+    }
+
+    /// Shows a running VM's screen in the terminal (view.rs) until its Control-].
+    fn show_screen(&mut self, terminal: &mut DefaultTerminal, vm: &Vm) -> Result<()> {
+        ratatui::restore();
+        let result = crate::view::run(vm, &crate::view::Options::default());
+        enable_raw_mode()?;
+        execute!(std::io::stdout(), EnterAlternateScreen)?;
+        terminal.clear()?;
+        match result {
+            Ok(Some(m)) => self.say(&m, Level::Info),
+            Ok(None) => {}
+            Err(e) => self.say(&format!("{}: {e:#}", vm.name()), Level::Error),
+        }
+        let _ = self.reload();
         Ok(())
     }
 
@@ -517,6 +539,7 @@ impl App {
             KeyCode::Char('K') => self.ask_force_stop(),
             KeyCode::Char('e') => self.open_edit(),
             KeyCode::Char('c') => self.show_command(),
+            KeyCode::Char('v') => self.view_screen(),
             KeyCode::Char('l') => self.toggle_logs(),
             KeyCode::Char('L') => self.view_logs(),
             KeyCode::Char('b') => self.report(),
@@ -765,6 +788,16 @@ impl App {
     }
 
     /// The selected VM's QEMU log, then its serial console, for the run loop to show in less.
+    fn view_screen(&mut self) {
+        let Some(r) = self.selected() else { return };
+        if r.pid.is_none() {
+            let name = r.name.clone();
+            self.say(&format!("{name} is not running: s starts it"), Level::Warn);
+            return;
+        }
+        self.pending_view = self.selected_vm();
+    }
+
     fn view_logs(&mut self) {
         let Some(vm) = self.selected_vm() else { return };
         let files: Vec<PathBuf> = [vm.qemu_log(), vm.serial_log()]
@@ -1378,6 +1411,13 @@ impl App {
                             ])
                         })
                         .collect();
+                    if r.pid.is_some() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "v shows its screen here, in the terminal",
+                            Style::new().dim(),
+                        )));
+                    }
                     // Below its settings, what starting it warns of on this host.
                     for w in runtime::warnings(vm, self.host) {
                         lines.push(Line::from(""));
@@ -1664,6 +1704,8 @@ reims-ctl runs macOS VMs on QEMU with reims-vgpu: each VM's displays open in win
               and its installer image (x86-64), a CD of which changes at once in a running VM
   c           show the QEMU command it runs, to write as launch.sh (w) or copy (y):
               run it yourself, without reims-ctl
+  v           show a running VM's screen here, in the terminal, and use its keyboard and
+              mouse from here: for a host with no screen, over SSH too. Ctrl-] comes back
   l           turn its logs on or off
   L           view its QEMU log in less: :n shows the serial console, / searches,
               F follows the log as it grows, q comes back

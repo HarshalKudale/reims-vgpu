@@ -15,6 +15,7 @@ mod qmp;
 mod runtime;
 mod tui;
 mod update;
+mod view;
 mod vm;
 mod vz;
 
