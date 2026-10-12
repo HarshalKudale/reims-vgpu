@@ -839,6 +839,60 @@ overlays, behind ULTMOS's OpenCore, on the RTX 3090:
 Not measured: a boot on Skylake-Client-noTSX-IBRS itself, and a boot behind
 OSX-KVM's OpenCore (it stopped at that image's picker).
 
+### x86-64 macOS guests: displays at most 2048 pixels wide
+
+An x86-64 macOS guest's WindowServer dies at boot, often enough to matter,
+on a display wider than 2048 pixels. The guest then comes up at the login
+window instead of logging in on its own, and later shows "WindowServer quit
+unexpectedly". METAL_ERROR_MODE (above) does not change it.
+
+The cause is in the guest, between its WindowServer and its Metal plugin for
+the PCI device, read from the code of macOS 26.6.1's (25G76) x86-64
+SkyLight and plugin:
+- SkyLight draws a window of at least 1024 × 1024 pixels' area in tiles of
+  1024 × 1024 pixels, from the left and the top. Each tile is a texture
+  made with `newTiledTextureWithDescriptor:offset:bytesPerRow:` over a
+  no-copy buffer of the window's pixels, the buffer ending within a page of
+  the window's last row. Its client storage debug option, off by default,
+  would make private textures instead; arm64 SkyLight makes private
+  textures.
+- The plugin counts a tile's bytes as its offset plus its rows times the
+  window's bytes per row, and refuses a tile that ends past the buffer. So
+  every tile of the bottom row but the first is refused: the count runs
+  past the buffer's end by the tile's offset in the row.
+- SkyLight keeps the textures it got in a list, skipping the refused ones,
+  and draws tile *n* with the list's *n*th entry, unchecked. With two tiles
+  across (2048 pixels or narrower) the one missing entry falls inside the
+  list's allocation; with three or more, the reads land past it, and
+  WindowServer dies on a texture pointer into freed memory, in the plugin's
+  `IOAccelResourceListAddResource`. Where its first command buffer is still
+  queued, the guest kernel frees WindowServer's objects under it, and the
+  host logs `task 1: exec faulted: resource 14 not found`, then sees a GPU
+  restart; a death before it leaves no line on the host.
+
+No answer of the host's reaches the plugin's count, so a guest on Apple's
+framework would meet it too (not measured).
+
+Measured on 2026-10-11 and 12 with a macOS 26.6.1 guest, from fresh
+overlays:
+- WindowServer's log holds the plugin's refusal at each boot: at 2560 ×
+  1600, allocations of 16388096 and 16392192 bytes against a buffer of
+  16384000 (the bottom row's second and third tiles); at 1920 × 1080, one
+  of 8298496 against 8294400.
+- On homelab-um780's RTX 3090, windowed, counted by the host's line (so a
+  death before the first command buffer is missed): 2560 × 1600 died at 4
+  boots of 4, 2304 × 1440 at 2 of 2, 2176 × 1360 at none of 2, 2048 × 1280
+  at none of 2; headless (`display-modes`), 2560 × 1600 at 1 of 3. On
+  homelab-ms01's Iris Xe, windowed, counted by the guest's crash reports,
+  2560 × 1600 died at about half its boots (13 of 29). 1920 × 1080 died at
+  none of 14 across both hosts, windowed and headless.
+- A tester's 2736 × 1704 (`resolution = "host"`, an Iris Xe under Linux)
+  left the host's line in 2 of its 5 boots' logs.
+
+Not measured: what the guest shows of a refused tile at 2048 pixels or
+narrower (the bottom-right tile of a large window), and an x86-64 guest
+older than macOS 26.
+
 ### App Nap
 
 macOS naps an application none of whose windows the person sees: QEMU's
