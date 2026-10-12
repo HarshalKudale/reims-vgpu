@@ -466,6 +466,22 @@ wikipedia.org and quit with no death: 5,119 dma-buf requests, textures' own
 among them, none refused; 5,095 took one dma-buf, 19 two, 2 three, 2 seven and
 1 sixteen.
 
+### Linux hosts: Intel GPUs without a shared last-level cache
+
+Arrow Lake-S's iGPU (`deviceID` 0x7d67, Xe-LPG; ANV of Mesa 26.2.4 on i915,
+Linux 7.2) shares no last-level cache with the host, and ANV's one host-cached
+memory type there is not coherent (`DEVICE_LOCAL | HOST_VISIBLE |
+HOST_CACHED`). metal2vulkan placed `Shared` and `Managed` textures in it for
+their host copies, and the GPU read stale 64-byte lines of them: an x86-64
+macOS 26 guest showed sparse, fully transparent 4x4-pixel blocks (one line of a
+Tile4 32-bit image) in its boot logo, Dock icons and widgets, kept in each
+texture (2026-10-12). Measured as the dark share of the boot logo's interior
+once the GPU draws it, at 57 and 60 s of a cold boot: 34% at metal2vulkan
+`11715e2a3f`; 6 and 17% with `INTEL_DEBUG=noccs`, with stale bright blocks
+outside the logo too; 14 and 29% with `INTEL_DEBUG=stall`. Since `edb5ffd8cc`,
+which keeps a host-copied texture out of memory the host maps without
+coherence, there are none, and the Dock and widgets are whole.
+
 ### Linux hosts: NVIDIA's pipeline import budget
 
 Measured on an RTX 3090 and an RTX 5080 Laptop GPU, NVIDIA driver
