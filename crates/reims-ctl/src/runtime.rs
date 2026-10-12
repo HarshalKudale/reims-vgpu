@@ -145,9 +145,29 @@ pub fn preflight(vm: &Vm, host: Host) -> Result<()> {
     Ok(())
 }
 
-/// Warnings about the host for a start that would still work.
+/// The reminder where an x86-64 VM's macOS gets installed.
+pub const SET_METAL_ERROR_MODE: &str = "set Metal's error mode once macOS is installed (README)";
+
+/// Warnings about the host, or the guest's last boot, for a start that would still work.
 pub fn warnings(vm: &Vm, host: Host) -> Vec<String> {
     let mut w = Vec::new();
+    if vm.config.profile == Profile::Q35X86_64 {
+        // docs/qemu.md, "x86-64 macOS guests: Metal's error mode": without it, macOS 26's icon
+        // service ends as it starts, again and again, and the library logs each command it left
+        // queued. From Recovery, the `cd` expands the Data volume's name, and `defaults` leaves
+        // the file at mode 0600, which the user's processes cannot read.
+        let n = emptied_entry_lines(&vm.qemu_log());
+        if n >= 3 {
+            w.push(format!(
+                "QEMU's latest log has {n} lines on GPU work left by crashed macOS processes. On \
+                 x86-64 macOS 26 that's most likely its icon service, crashing because Metal's \
+                 error mode isn't set, and the desktop can stay on its wallpaper. To set it, boot \
+                 Recovery from OpenCore's picker, open Utilities > Terminal and run: cd \
+                 /Volumes/*Data/Library/Preferences && defaults write \"$PWD/.GlobalPreferences\" \
+                 METAL_ERROR_MODE -int 5 && chmod 644 .GlobalPreferences.plist && reboot"
+            ));
+        }
+    }
     if host.os == Os::Linux {
         // docs/qemu.md, "Linux hosts: vm.max_map_count": guest memory views take a mapping per
         // run of 16 KiB pages; the stock 65,530 holds about 770 MiB of them.
@@ -203,6 +223,41 @@ fn may_run_on_radv(gpu: &crate::vm::Gpu) -> bool {
             vendors.iter().any(|v| v == "0x1002") && !vendors.iter().any(|v| v == "0x10de")
         }
     }
+}
+
+/// How many lines of a QEMU log, since the guest's last reset, name an object entry the guest
+/// had emptied: the library logs them at its warn level when a command of a guest process that
+/// has ended runs, and `device reset` at its info level. The TUI asks at every draw, so the count
+/// carries on from the bytes already read while the file is the same (by inode) and has not
+/// shrunk.
+fn emptied_entry_lines(log: &Path) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    const EMPTIED: &[u8] = b"has an empty entry";
+    static READ: std::sync::Mutex<(std::path::PathBuf, u64, u64, usize)> =
+        std::sync::Mutex::new((std::path::PathBuf::new(), 0, 0, 0));
+    let Ok(mut f) = std::fs::File::open(log) else {
+        return 0;
+    };
+    let Ok(meta) = f.metadata() else { return 0 };
+    let mut r = READ.lock().unwrap_or_else(|e| e.into_inner());
+    if r.0 != log || r.1 != meta.ino() || r.2 > meta.len() {
+        *r = (log.to_path_buf(), meta.ino(), 0, 0);
+    }
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(r.2)).is_ok() {
+        let _ = f.take(meta.len() - r.2).read_to_end(&mut buf);
+    }
+    // Whole lines only: the rest is read again once its line ends.
+    let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    for l in buf[..end].split(|&b| b == b'\n') {
+        if l.ends_with(b"device reset") {
+            r.3 = 0;
+        } else if l.windows(EMPTIED.len()).any(|w| w == EMPTIED) {
+            r.3 += 1;
+        }
+    }
+    r.2 += end as u64;
+    r.3
 }
 
 /// Keeps the last five of a log: `x.log` becomes `x.1.log`, and so on.
@@ -524,5 +579,45 @@ mod tests {
             "/usr/share/vulkan/icd.d/nvidia_icd.json",
             "NVIDIA GeForce RTX 3090"
         )));
+    }
+
+    #[test]
+    fn emptied_entry_lines_count_on_from_what_was_read() {
+        let d = std::env::temp_dir().join(format!("reims-ctl-emptied-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let log = d.join("qemu.log");
+        let fault = "reims-vgpu WARN reims_vgpu_core::tasks::local::exec: task 2: exec faulted: \
+                     resource 3 not found: object 3 has an empty entry\n";
+        let append = |s: &str| {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+                .unwrap();
+            f.write_all(s.as_bytes()).unwrap();
+        };
+        assert_eq!(emptied_entry_lines(&log), 0);
+        append("reims-ctl 0.1.0 started t\n");
+        append(fault);
+        assert_eq!(emptied_entry_lines(&log), 1);
+        // A line still being written counts once it ends.
+        append(&fault[..40]);
+        assert_eq!(emptied_entry_lines(&log), 1);
+        append(&fault[40..]);
+        append(fault);
+        assert_eq!(emptied_entry_lines(&log), 3);
+        // The guest's reboot in the same run (as after setting the key from Recovery) counts
+        // from the device's reset.
+        append("reims-vgpu INFO reims_vgpu_core::device::lifecycle: device reset\n");
+        assert_eq!(emptied_entry_lines(&log), 0);
+        append(fault);
+        assert_eq!(emptied_entry_lines(&log), 1);
+        // A start's rotation leaves a new file, counted from its start.
+        std::fs::rename(&log, d.join("qemu.1.log")).unwrap();
+        append(&"x".repeat(4096));
+        append("\n");
+        append(fault);
+        assert_eq!(emptied_entry_lines(&log), 1);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

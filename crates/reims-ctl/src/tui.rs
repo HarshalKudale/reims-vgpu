@@ -1121,8 +1121,13 @@ impl App {
                 let name = spec.name.clone();
                 self.spawn(&name, "creating", move |p| {
                     let vm = create::create(spec, host, p)?;
+                    let next = if vm.config.profile == Profile::Q35X86_64 {
+                        format!(" · {}", runtime::SET_METAL_ERROR_MODE)
+                    } else {
+                        String::new()
+                    };
                     Ok(format!(
-                        "created {} in {} · s starts it",
+                        "created {} in {} · s starts it{next}",
                         vm.name(),
                         paths::tilde(&vm.dir)
                     ))

@@ -639,6 +639,9 @@ fn create_cmd(a: CreateArgs, host: Host) -> Result<()> {
         }
     })?;
     println!("created {name} in {}", paths::tilde(&vm.dir));
+    if vm.config.profile == Profile::Q35X86_64 {
+        println!("{name}: {}", runtime::SET_METAL_ERROR_MODE);
+    }
     if a.start {
         let pid = runtime::start(&vm, host)?;
         println!("{name}: running, pid {pid}");
@@ -872,7 +875,10 @@ pub fn set_installer(
     if !running {
         return Ok(match &path {
             Some(p) => format!("{name}: {} attached for the next start", paths::tilde(p)),
-            None => format!("{name}: installer removed"),
+            None => format!(
+                "{name}: installer removed; {}",
+                runtime::SET_METAL_ERROR_MODE
+            ),
         });
     }
     // Live: only a CD drive's disc changes; a disk installer changes at the next start.
@@ -881,8 +887,13 @@ pub fn set_installer(
         runtime::change_cd(vm, path.as_deref())?;
         Ok(match &path {
             Some(p) => format!("{name}: {} is in the CD drive", paths::tilde(p)),
-            None => format!("{name}: CD ejected"),
+            None => format!("{name}: CD ejected; {}", runtime::SET_METAL_ERROR_MODE),
         })
+    } else if path.is_none() {
+        let tip = runtime::SET_METAL_ERROR_MODE;
+        Ok(format!(
+            "{name}: the installer goes at the next start; {tip}"
+        ))
     } else {
         Ok(format!("{name}: the installer changes at the next start"))
     }
