@@ -164,8 +164,45 @@ pub fn warnings(vm: &Vm, host: Host) -> Vec<String> {
                 ));
             }
         }
+        // docs/qemu.md, "Linux hosts: AMD GPUs and udmabuf": RADV imports the guest's memory as
+        // dma-bufs udmabuf makes.
+        if may_run_on_radv(&vm.config.gpu) {
+            let usable = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/udmabuf");
+            if let Err(e) = usable {
+                w.push(format!(
+                    "/dev/udmabuf cannot be opened ({e}): an AMD GPU needs it for the guest's \
+                     memory, or the guest dies at boot. Add yourself to the group that owns it \
+                     (kvm on Ubuntu; sudo usermod -aG kvm $USER, then log in again)"
+                ));
+            }
+        }
     }
     w
+}
+
+/// Whether a VM may run on RADV, Mesa's driver for AMD GPUs: its GPU is one, or none is set and
+/// the host has an AMD GPU and no NVIDIA one, which the library would pick first as discrete.
+fn may_run_on_radv(gpu: &crate::vm::Gpu) -> bool {
+    let radv = |file: &Path| {
+        file.file_name()
+            .is_some_and(|f| f.to_string_lossy().starts_with("radeon_icd"))
+    };
+    match &gpu.driver_file {
+        Some(file) => radv(file) || gpu.name.as_deref().is_some_and(|n| n.contains("RADV")),
+        None => {
+            let vendors: Vec<String> = std::fs::read_dir("/sys/class/drm")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|card| std::fs::read_to_string(card.path().join("device/vendor")).ok())
+                .map(|v| v.trim().to_owned())
+                .collect();
+            vendors.iter().any(|v| v == "0x1002") && !vendors.iter().any(|v| v == "0x10de")
+        }
+    }
 }
 
 /// Keeps the last five of a log: `x.log` becomes `x.1.log`, and so on.
@@ -458,4 +495,34 @@ pub fn tail(path: &Path, n: usize) -> String {
     let text = String::from_utf8_lossy(&buf);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::Gpu;
+    use std::path::PathBuf;
+
+    /// A VM pinned to Mesa's radeon driver, or to a GPU named RADV, may run on RADV; one pinned
+    /// to NVIDIA's may not
+    #[test]
+    fn a_pinned_gpu_decides_radv() {
+        let gpu = |file: &str, name: &str| Gpu {
+            driver_file: Some(PathBuf::from(file)),
+            device_id: None,
+            name: Some(name.to_owned()),
+        };
+        assert!(may_run_on_radv(&gpu(
+            "/usr/share/vulkan/icd.d/radeon_icd.json",
+            "AMD Radeon 780M Graphics (RADV PHOENIX)"
+        )));
+        assert!(may_run_on_radv(&gpu(
+            "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json",
+            "AMD Radeon 780M Graphics"
+        )));
+        assert!(!may_run_on_radv(&gpu(
+            "/usr/share/vulkan/icd.d/nvidia_icd.json",
+            "NVIDIA GeForce RTX 3090"
+        )));
+    }
 }
