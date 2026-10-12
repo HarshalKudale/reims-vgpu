@@ -285,51 +285,27 @@ impl Default for Logs {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaKind {
-    /// A CD drive (`.iso`, `.cdr`), whose disc can be changed while the VM runs.
-    Cdrom,
-    /// A read-only disk (a raw `BaseSystem.img`, as OSX-KVM's and ULTMOS's installers come):
-    /// writes go to a temporary overlay.
-    Disk,
-}
-
-impl MediaKind {
-    pub fn for_path(p: &Path) -> MediaKind {
-        match p
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("iso" | "cdr") => MediaKind::Cdrom,
-            _ => MediaKind::Disk,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Q35 {
-    /// The OpenCore image (its own copy in the VM's directory).
+    /// The OpenCore image, in the VM's directory: made for it, or a copy of one given.
     pub opencore: PathBuf,
     #[serde(default)]
     pub opencore_format: ImageFormat,
     /// OVMF's code and variables (copies in the VM's directory).
     pub firmware_code: PathBuf,
     pub firmware_vars: PathBuf,
-    /// The installer: used in place where absolute; relative, the VM's raw copy of a DMG
-    /// (`create::installer_media`), which a change of installer deletes.
+    /// The installer, a raw image (reims-util's offline installer, or a recovery image's raw
+    /// copy) attached as a disk, whose writes go to a temporary overlay: used in place where
+    /// absolute; relative, the VM's raw copy of a DMG (`create::installer_media`), which a change
+    /// of installer deletes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub installer: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installer_kind: Option<MediaKind>,
     #[serde(default = "default_cpu_model")]
     pub cpu_model: String,
     #[serde(default = "default_cpu_flags")]
     pub cpu_flags: String,
-    /// The AHCI port of the system disk: 3, as OSX-KVM and ULTMOS attach it. OpenCore's saved
-    /// boot entry names the port.
+    /// The AHCI port of the system disk: 3, after OpenCore's 2, for every VM reims-ctl makes.
+    /// OpenCore's saved boot entry names the port.
     #[serde(default = "default_disk_port")]
     pub disk_port: u32,
 }
@@ -732,7 +708,6 @@ mod tests {
                 firmware_code: "OVMF_CODE.fd".into(),
                 firmware_vars: "OVMF_VARS.fd".into(),
                 installer: Some("/isos/BaseSystem.img".into()),
-                installer_kind: Some(MediaKind::Disk),
                 cpu_model: default_cpu_model(),
                 cpu_flags: default_cpu_flags(),
                 disk_port: 3,

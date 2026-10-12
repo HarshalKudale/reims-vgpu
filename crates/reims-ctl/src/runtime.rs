@@ -12,7 +12,7 @@
 use crate::host::{Host, Os, Profile};
 use crate::qemu::{self, Ctx, Invocation};
 use crate::qmp;
-use crate::vm::{MediaKind, Vm};
+use crate::vm::Vm;
 use anyhow::{Context, Result, bail};
 use serde_json::json;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -117,8 +117,15 @@ pub fn preflight(vm: &Vm, host: Host) -> Result<()> {
             need(&vm.path(&q.opencore), "the OpenCore image")?;
             need(&vm.path(&q.firmware_code), "the firmware")?;
             need(&vm.path(&q.firmware_vars), "the firmware variables")?;
-            if let Some(i) = &q.installer {
-                need(&vm.path(i), "the installer")?;
+            if let Some(i) = q.installer.as_ref().map(|i| vm.path(i))
+                && !i.exists()
+            {
+                bail!(
+                    "the installer {} is missing: reims-ctl eject {} takes it out (in the \
+                     interface, clear Installer image in its edit form, e)",
+                    i.display(),
+                    c.name
+                );
             }
         }
         Profile::VmappleArm64 => {
@@ -148,6 +155,46 @@ pub fn preflight(vm: &Vm, host: Host) -> Result<()> {
 /// The reminder where an x86-64 VM's macOS gets installed.
 pub const SET_METAL_ERROR_MODE: &str = "set Metal's error mode once macOS is installed (README)";
 
+/// The host's `vm.max_map_count` (Linux).
+pub fn host_max_map_count() -> Option<u64> {
+    std::fs::read_to_string("/proc/sys/vm/max_map_count")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// The `vm.max_map_count` a guest of `memory_mib` needs on Linux, and the value to suggest
+/// raising it to. docs/qemu.md, "Linux hosts: vm.max_map_count": guest memory views take a
+/// mapping per run of 16 KiB pages; the stock 65,530 holds about 770 MiB of them.
+pub fn max_map_count(memory_mib: u64) -> (u64, u64) {
+    let want = (memory_mib * 64).max(262_144) + 16_384 + 65_536;
+    // 2097152 covers a guest of up to 30 GiB, a new VM's default of up to 16 GiB among them.
+    (want, want.next_power_of_two().max(2_097_152))
+}
+
+/// How to install macOS in an x86-64 VM that has an installer, for the CLI and the interface's
+/// details; None for other VMs. An offline installer, which reims-util names
+/// `…-offline-installer.img`, installs from its script; any other installer boots Recovery,
+/// whose Reinstall macOS installs it.
+pub fn install_steps(vm: &Vm) -> Option<String> {
+    let q = vm.config.q35.as_ref()?;
+    let installer = q.installer.as_ref()?;
+    let offline = installer
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().ends_with("-offline-installer.img"));
+    let last = if offline {
+        "open Utilities > Terminal and run: sh /Volumes/Installer/install-macos.sh"
+    } else {
+        "pick Reinstall macOS"
+    };
+    Some(format!(
+        "To install macOS, start {name}: OpenCore boots its installer into macOS Recovery. If the \
+         VM's disk is new, open Disk Utility, erase it (QEMU HARDDISK Media) as APFS and quit \
+         Disk Utility. Then {last}. Once macOS is installed, eject the installer (reims-ctl \
+         eject {name}) and set Metal's error mode (README).",
+        name = vm.name()
+    ))
+}
+
 /// Warnings about the host, or the guest's last boot, for a start that would still work.
 pub fn warnings(vm: &Vm, host: Host) -> Vec<String> {
     let mut w = Vec::new();
@@ -169,17 +216,12 @@ pub fn warnings(vm: &Vm, host: Host) -> Vec<String> {
         }
     }
     if host.os == Os::Linux {
-        // docs/qemu.md, "Linux hosts: vm.max_map_count": guest memory views take a mapping per
-        // run of 16 KiB pages; the stock 65,530 holds about 770 MiB of them.
-        if let Some(n) = std::fs::read_to_string("/proc/sys/vm/max_map_count")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-        {
-            let want = (vm.config.memory_mib * 64).max(262_144) + 16_384 + 65_536;
+        if let Some(n) = host_max_map_count() {
+            let (want, raise) = max_map_count(vm.config.memory_mib);
             if n < want {
                 w.push(format!(
                     "vm.max_map_count is {n}: a {} GiB guest needs about {want}. Raise it with \
-                     sudo sysctl -w vm.max_map_count=1048576 (and in /etc/sysctl.d to keep it)",
+                     sudo sysctl -w vm.max_map_count={raise} (and in /etc/sysctl.d to keep it)",
                     vm.config.memory_mib / 1024
                 ));
             }
@@ -509,34 +551,6 @@ fn wait_gone(p: i32, t: Duration) -> bool {
     !alive(p)
 }
 
-/// Puts `path` in the running VM's CD drive, or empties it (`None`).
-pub fn change_cd(vm: &Vm, path: Option<&Path>) -> Result<()> {
-    let q = vm
-        .config
-        .q35
-        .as_ref()
-        .context("only q35 VMs have a CD drive")?;
-    if q.installer_kind == Some(MediaKind::Disk) && q.installer.is_some() {
-        bail!("the installer is attached as a disk, which changes at the next start");
-    }
-    let sock = vm.qmp_socket();
-    match path {
-        Some(p) => qmp::run(
-            &sock,
-            "blockdev-change-medium",
-            Some(
-                json!({ "id": "cdrom", "filename": p.to_string_lossy(), "format": "raw", "read-only-mode": "read-only" }),
-            ),
-        )?,
-        None => qmp::run(
-            &sock,
-            "eject",
-            Some(json!({ "id": "cdrom", "force": true })),
-        )?,
-    };
-    Ok(())
-}
-
 /// The last `n` lines of a text file.
 pub fn tail(path: &Path, n: usize) -> String {
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -557,6 +571,16 @@ mod tests {
     use super::*;
     use crate::vm::Gpu;
     use std::path::PathBuf;
+
+    #[test]
+    fn the_suggested_max_map_count_covers_new_vms() {
+        // A new VM's default is up to 16 GiB; CachyOS's stock 1048576 falls short of it.
+        assert_eq!(max_map_count(16 * 1024), (1_130_496, 2_097_152));
+        assert_eq!(max_map_count(4096), (344_064, 2_097_152));
+        let (want, raise) = max_map_count(30 * 1024);
+        assert!(want <= raise && raise == 2_097_152);
+        assert_eq!(max_map_count(32 * 1024).1, 4_194_304);
+    }
 
     /// A VM pinned to Mesa's radeon driver, or to a GPU named RADV, may run on RADV; one pinned
     /// to NVIDIA's may not

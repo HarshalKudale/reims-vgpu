@@ -13,7 +13,7 @@
 //!   keyboard's keys (keys.rs).
 //!
 //! QMP's socket serves one client at a time, so the viewer lets its connection go after each
-//! frame, and `reims-ctl stop`, `insert` and `eject` get in while it runs.
+//! frame, and `reims-ctl stop` gets in while it runs.
 //!
 //! QEMU's USB keyboard queues 16 scancodes, drops a key whose scancodes do not fit, and gives the
 //! guest one each time it polls the keyboard (hw/input/hid.c). Keys go out at most 12 scancodes

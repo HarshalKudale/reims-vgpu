@@ -800,15 +800,18 @@ before macOS 26.
 
 `reims-ctl` gives a new VM `Skylake-Client-noTSX-IBRS`. Under KVM the model
 sets only what CPUID reports; with `check`, QEMU drops a feature the host
-lacks and warns once per vCPU.
+lacks and warns once per vCPU. A VM keeps the model it was made with in its
+`vm.toml` (`cpu_model` and `cpu_flags` under `[q35]`; VMs `reims-ctl` made
+before 2026-10-12 have `Haswell-noTSX`): edit them there, or remove both for
+the default, and the VM runs the new model from its next start.
 
 - **Haswell-noTSX** is model 60, stepping 1. XNU panics on model 60 below
   stepping 3 ("Haswell pre-C0 steppings are not supported",
   `osfmk/i386/machine_check.c`, read from code). It boots only behind an
   OpenCore that replaces CPUID leaf 1 (`Kernel > Emulate > Cpuid1Data`):
-  ULTMOS's image sets `0x00050654`, Skylake-SP stepping 4, so its guests see
-  model 85 under any `-cpu`. OSX-KVM's image (`4c378a4`) leaves it empty, and
-  OSX-KVM's own launcher uses `Skylake-Client,-hle,-rtm`.
+  reims-util's image sets `0x00050654`, Skylake-SP stepping 4, unless made
+  with `--no-cpuid-spoof` (read from code), so its guests see model 85 under
+  any `-cpu`.
 - **Cascadelake-Server** (v1) adds TSX, which no host here has, and AVX-512,
   which Intel's hybrid parts (12th generation on) lack. On an AMD host with
   AVX-512 the guest gets it, and XNU saves its registers at Intel's XSAVE
@@ -819,7 +822,8 @@ lacks and warns once per vCPU.
 
 Measured on 2026-10-12 on homelab-um780 (a Ryzen 7 7840HS, Zen 4, QEMU at
 `871e0931`) with an x86-64 macOS 26.6.1 guest (25G76) on `snapshot=on`
-overlays, behind ULTMOS's OpenCore, on the RTX 3090:
+overlays, behind an OpenCore whose `Cpuid1Data` is `0x00050654`, on the
+RTX 3090:
 - `query-cpu-definitions` under KVM: every model above lacks only `pcid`
   here (plus `hle` and `rtm` for Cascadelake-Server v1); on homelab-ms01 (a
   Core i9-13900H) Haswell-noTSX and Skylake-Client-noTSX-IBRS lack nothing,
@@ -837,7 +841,7 @@ overlays, behind ULTMOS's OpenCore, on the RTX 3090:
   encode 30% and decode 12%; FFT, vImage, memcpy and memset the same.
 
 Not measured: a boot on Skylake-Client-noTSX-IBRS itself, and a boot behind
-OSX-KVM's OpenCore (it stopped at that image's picker).
+an OpenCore that leaves leaf 1 as it is.
 
 ### x86-64 macOS guests: displays at most 2048 pixels wide
 
