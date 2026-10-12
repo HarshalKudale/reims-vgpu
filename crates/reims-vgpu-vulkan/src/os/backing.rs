@@ -355,7 +355,7 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
         .map(|r| r.end - r.first)
         .fold(0u64, u64::saturating_add);
     #[cfg(target_os = "linux")]
-    super::linux::budget::warn_if_short(guest_ram);
+    super::linux::warn_if_short(guest_ram);
     #[cfg(windows)]
     let _ = guest_ram;
     GuestMemoryLease {

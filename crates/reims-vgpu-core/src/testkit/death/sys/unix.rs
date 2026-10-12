@@ -15,8 +15,11 @@ use crate::num::ToU64;
 pub use std::os::unix::fs::FileExt;
 
 pub const ABORT: i32 = sys::SIGABRT;
+#[cfg(test)]
 pub const TRAP: i32 = sys::SIGTRAP;
+#[cfg(test)]
 pub const OVERFLOW: i32 = sys::SIGABRT;
+#[cfg(test)]
 pub const OVERFLOW_LINE: &str = "fatal runtime error: stack overflow";
 
 /// The calling thread's system id and name, without allocating (the signal handler calls it).
@@ -212,6 +215,7 @@ pub fn exit(status: i32) -> ! {
     sys::_exit(status)
 }
 
+#[cfg(test)]
 pub fn trap() -> ! {
     sys::raise(sys::SIGTRAP);
     panic!("SIGTRAP returned")

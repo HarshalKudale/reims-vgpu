@@ -790,7 +790,7 @@ mod tests {
         assert!(recorded_mut(&several, |made| made.gpu_read_only).unwrap());
         let (view, length) = mapped_range(&several).unwrap();
         assert_eq!((view, length), (base - 0x40, 3 * page));
-        let pieces = super::backing::pieces(view, length).unwrap();
+        let pieces = crate::os::backing::pieces(view, length).unwrap();
         assert!(pieces.iter().all(|p| p.prot == 1));
         assert_eq!(
             recorded_mut(&several, |made| made.pages.clone()).unwrap(),

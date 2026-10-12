@@ -113,7 +113,7 @@ $config = [ordered]@{
     qmp_port = $QmpPort; ssh_port = $SshPort; iso = $Iso; media_kind = $media.media_kind
     base_disk = $baseDisk; active_disk = $activeDisk; opencore = $oc.image
     firmware_code = $oc.firmware_code; firmware_vars = $vars
-    rom = Join-Path $ProjectRoot '.work/target/dist-vulkan/ReimsVgpu.rom'
+    rom = Join-Path $ProjectRoot '.work/target/dist-vulkan/share/reims-vgpu/ReimsVgpu.rom'
 }
 Write-ReimsJson $configPath $config
 $config | ConvertTo-Json -Depth 5

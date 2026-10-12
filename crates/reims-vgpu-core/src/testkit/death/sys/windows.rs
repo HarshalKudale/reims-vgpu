@@ -22,6 +22,7 @@ pub const ABORT: i32 = 0xc000_0409u32.cast_signed();
 pub const TRAP: i32 = 0x8000_0003u32.cast_signed();
 /// A stack overflow's native Windows status, measured both with and without this harness.
 pub const OVERFLOW: i32 = 0xc000_00fdu32.cast_signed();
+#[cfg(test)]
 pub const OVERFLOW_LINE: &str = "has overflowed its stack";
 
 // The EXCEPTION_DEBUG_INFO is 160 bytes on the supported 64-bit Windows host.
@@ -62,6 +63,7 @@ unsafe extern "system" {
     fn GetThreadDescription(thread: *mut c_void, description: *mut *mut u16) -> i32;
     fn LocalFree(address: *mut c_void) -> *mut c_void;
     fn ExitProcess(code: u32) -> !;
+    #[cfg(test)]
     fn RaiseException(code: u32, flags: u32, count: u32, args: *const usize);
 }
 
@@ -173,11 +175,8 @@ pub unsafe fn remap(_file: &File, start: usize, span: usize, off: u64, now: &[u8
     let section = section(&file);
     let addr = std::ptr::with_exposed_provenance_mut::<c_void>(start);
     // SAFETY: RawRegion owns this whole virtual allocation, shared before other threads touch it.
-    assert_ne!(
-        unsafe { VirtualFree(addr, 0, 0x8000) },
-        0,
-        "death harness: VirtualFree"
-    );
+    let freed = unsafe { VirtualFree(addr, 0, 0x8000) };
+    assert_ne!(freed, 0, "death harness: VirtualFree");
     // SAFETY: replace the same addresses with the file's shared bytes; all region pointers survive.
     let p = unsafe { MapViewOfFileEx(section.as_raw_handle(), 2, 0, 0, span, addr) };
     assert_eq!(
@@ -322,8 +321,9 @@ pub fn wait(child: &mut Child, file: &File, timeout: Duration) -> (ExitStatus, b
                 _ => {}
             }
             // SAFETY: resume the event just received; process/thread handles close at their exit.
+            let continued = unsafe { ContinueDebugEvent(event.process, event.thread, status) };
             assert_ne!(
-                unsafe { ContinueDebugEvent(event.process, event.thread, status) },
+                continued,
                 0,
                 "death harness: ContinueDebugEvent: {}",
                 io::Error::last_os_error()
@@ -363,6 +363,7 @@ pub fn exit(status: i32) -> ! {
     unsafe { ExitProcess(status.cast_unsigned()) }
 }
 
+#[cfg(test)]
 pub fn trap() -> ! {
     // SAFETY: the harness's deliberate, noncontinuable native exception.
     unsafe { RaiseException(TRAP.cast_unsigned(), 1, 0, std::ptr::null()) };

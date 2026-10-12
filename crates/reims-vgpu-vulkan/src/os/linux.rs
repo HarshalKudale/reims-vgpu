@@ -5,7 +5,7 @@
 //! the loader). No Objective-C runs here: core pushes no autorelease pool where none is
 //! installed.
 
-pub(super) mod budget;
+mod budget;
 mod clock;
 use super::backing as files;
 mod import;
@@ -24,6 +24,10 @@ pub use surface::{StandInSurface as LinuxSurface, StandInSurfaces as LinuxSurfac
 pub use threads::LinuxThreads;
 pub use vm::LinuxVm;
 pub(crate) use vm::OwnMemory;
+
+pub(super) fn warn_if_short(guest_ram: u64) {
+    budget::warn_if_short(guest_ram);
+}
 
 pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, ycbcr_matrix};

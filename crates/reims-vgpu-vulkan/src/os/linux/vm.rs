@@ -206,7 +206,10 @@ pub(crate) fn allocate_aliasable(len: u64) -> Result<HostAddr, KernReturn> {
     }
     budget::admit(1, "a range a view can be made of");
     let fd = memfd(length);
-    let backing = Backing { fd, offset: 0 };
+    let backing = Backing {
+        file: fd,
+        offset: 0,
+    };
     let prot = libc::PROT_READ | libc::PROT_WRITE;
     let at = file(None, length, &backing, prot)?;
     files::record(at, length, backing, prot);

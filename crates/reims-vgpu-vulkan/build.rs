@@ -201,7 +201,7 @@ fn main() -> Result<(), String> {
 }
 
 /// MinGW does not ship a KernelBase import library for the placeholder APIs.
-/// Build the three imports from their documented names with the native LLVM tool.
+/// Build the imports from their documented names with the native LLVM tool.
 fn windows_import_library(out: &Path) -> Result<(), String> {
     let definition = out.join("kernelbase.def");
     std::fs::write(&definition, "LIBRARY kernelbase.dll\nEXPORTS\nVirtualAlloc2\nMapViewOfFile3\nUnmapViewOfFile2\nQueryInterruptTimePrecise\n")
@@ -214,7 +214,9 @@ fn windows_import_library(out: &Path) -> Result<(), String> {
         .arg(&library)
         .status()
         .map_err(|e| format!("llvm-dlltool: {e}"))?;
-    if !status.success() { return Err(format!("llvm-dlltool failed: {status}")); }
+    if !status.success() {
+        return Err(format!("llvm-dlltool failed: {status}"));
+    }
     println!("cargo:rustc-link-search=native={}", out.display());
     Ok(())
 }

@@ -293,6 +293,20 @@ fn replace(first: u64, length: u64, new: &[Piece]) -> Result<(), KernReturn> {
     Ok(())
 }
 
+/// Maps the retained sections and records their views, including writable import aliases.
+pub(super) fn map_parts(first: u64, length: u64, parts: &[Piece]) -> Result<(), KernReturn> {
+    replace(first, length, parts)?;
+    for piece in parts {
+        files::record(
+            first + piece.at,
+            piece.length,
+            piece.backing.clone(),
+            piece.prot,
+        );
+    }
+    Ok(())
+}
+
 fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
     let backing = Backing {
         file: section(length)?,
@@ -317,12 +331,9 @@ fn allocate(length: u64) -> Result<HostAddr, KernReturn> {
 }
 
 /// A zero-filled range whose pages can be shared in other views.
+#[cfg(test)]
 pub(crate) fn allocate_aliasable(length: u64) -> Result<HostAddr, KernReturn> {
     WindowsVm::new().allocate_anywhere(length)
-}
-/// Zero-filled aliasable memory.
-pub(crate) fn allocate_zeros(length: u64) -> Result<HostAddr, KernReturn> {
-    allocate_aliasable(length)
 }
 
 /// Memory owned by an IOSurface, which core cannot deallocate.
@@ -454,10 +465,7 @@ impl HostVm for WindowsVm {
         .ok_or(INVALID_ARGUMENT)?;
         let (source, _) = pages(source, 1).ok_or(INVALID_ADDRESS)?;
         let parts = files::pieces(source, length).ok_or(INVALID_ADDRESS)?;
-        replace(first, length, &parts)?;
-        for piece in parts {
-            files::record(first + piece.at, piece.length, piece.backing, piece.prot);
-        }
+        map_parts(first, length, &parts)?;
         Ok(destination)
     }
     fn protect_max(&self, address: HostAddr, length: u64, prot: VmProt) -> Result<(), KernReturn> {

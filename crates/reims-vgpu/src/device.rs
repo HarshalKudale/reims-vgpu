@@ -634,9 +634,15 @@ mod tests {
     fn memory_map_ranges() {
         let mut m = MemoryMap::new();
         let mut page = [0u8; 8];
+        #[cfg(unix)]
         let fd = Arc::new(OwnedFd::from(std::fs::File::open("/dev/null").unwrap()));
+        #[cfg(windows)]
+        let fd = Arc::new(OwnedHandle::from(std::fs::File::open("NUL").unwrap()));
         let file = MemoryFile {
+            #[cfg(unix)]
             fd: fd.clone(),
+            #[cfg(windows)]
+            handle: fd.clone(),
             offset: 0x8000,
         };
         // SAFETY: nothing is built over this map.
@@ -653,7 +659,10 @@ mod tests {
             .map(|f| f.as_ref().map(|f| f.offset))
             .collect();
         assert_eq!(files, [None, Some(0x8000)]);
+        #[cfg(unix)]
         assert!(Arc::ptr_eq(&m.files()[1].as_ref().unwrap().fd, &fd));
+        #[cfg(windows)]
+        assert!(Arc::ptr_eq(&m.files()[1].as_ref().unwrap().handle, &fd));
         // A clone of the map holds the same file.
         let copy = m.clone();
         assert_eq!(Arc::strong_count(&fd), 3);

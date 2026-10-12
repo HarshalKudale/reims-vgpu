@@ -107,10 +107,22 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
 
+    #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::Command;
 
     use super::*;
+
+    fn assert_aborted(out: &std::process::Output) {
+        #[cfg(unix)]
+        assert_eq!(out.status.signal(), Some(6), "{out:?}");
+        #[cfg(windows)]
+        assert_eq!(
+            out.status.code(),
+            Some(0xc000_0409u32.cast_signed()),
+            "{out:?}"
+        );
+    }
 
     /// Re-runs this test binary on one test with `var` set.
     fn child(test: &str, var: &str) -> std::process::Output {
@@ -138,7 +150,7 @@ mod tests {
             "singleton::tests::one_platform_per_process",
             "RVG_PLATFORM_CHILD",
         );
-        assert_eq!(out.status.signal(), Some(6), "{out:?}");
+        assert_aborted(&out);
         assert!(String::from_utf8_lossy(&out.stderr).contains("reims-vgpu: "));
     }
 
@@ -158,7 +170,7 @@ mod tests {
             "singleton::tests::one_vulkan_platform_per_process",
             "RVG_VULKAN_PLATFORM_CHILD",
         );
-        assert_eq!(out.status.signal(), Some(6), "{out:?}");
+        assert_aborted(&out);
         assert!(String::from_utf8_lossy(&out.stderr).contains("reims-vgpu: "));
     }
 
@@ -188,7 +200,7 @@ mod tests {
             "singleton::tests::panic_on_our_thread_aborts_before_unwinding",
             "RVG_HOOK_OURS_CHILD",
         );
-        assert_eq!(out.status.signal(), Some(6), "{out:?}");
+        assert_aborted(&out);
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!stdout.contains("DROPPED"), "{stdout}");
@@ -218,7 +230,10 @@ mod tests {
             "singleton::tests::panic_elsewhere_defers_to_the_previous_hook",
             "RVG_HOOK_OTHER_CHILD",
         );
+        #[cfg(unix)]
         assert_eq!(out.status.signal(), None, "{out:?}");
+        #[cfg(windows)]
+        assert_eq!(out.status.code(), Some(101), "{out:?}");
         assert!(!out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);

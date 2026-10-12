@@ -135,7 +135,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
     $serial = ConvertTo-ReimsQemuPath (Join-Path $RunDirectory 'serial.log')
     $qemuArguments = @(
         '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx' }),
-        '-cpu', $Config.cpu, '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
+        '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',
         '-device', 'pcie-root-port,bus=pcie.0,addr=0x1,slot=1,x-speed=16,x-width=32',
         '-device', 'isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc',
@@ -174,7 +174,7 @@ $whpx = Get-ReimsWhpxStatus
 $qemuArgs = Get-ReimsQemuArguments $config $run -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
 $launch = [ordered]@{
     executable = $Qemu; arguments = $qemuArgs; whpx = $whpx
-    headless = [bool]($Headless -or $DiagnosticTcg); diagnostic_only = [bool]$DiagnosticTcg
+    headless = [bool]$Headless; diagnostic_only = [bool]$DiagnosticTcg
 }
 if ($DryRun) {
     Write-ReimsJson (Join-Path $ProjectRoot '.work/diagnostics/vm-launch.json') $launch
@@ -205,7 +205,7 @@ New-Item -ItemType Directory -Force -Path $run | Out-Null
 Write-ReimsJson (Join-Path $run 'command.json') $launch
 $env:REIMS_VGPU_LOG = 'info'
 $env:REIMS_VGPU_STATS = '1'
-if ($Headless -or $DiagnosticTcg) { $env:REIMS_VGPU_WINDOW = '0' } else { Remove-Item Env:REIMS_VGPU_WINDOW -ErrorAction SilentlyContinue }
+if ($Headless) { $env:REIMS_VGPU_WINDOW = '0' } else { Remove-Item Env:REIMS_VGPU_WINDOW -ErrorAction SilentlyContinue }
 $process = Start-Process -FilePath $Qemu -ArgumentList (($qemuArgs | ForEach-Object { ConvertTo-ReimsWindowsArgument $_ }) -join ' ') -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run 'stdout.log') -RedirectStandardError (Join-Path $run 'stderr.log') -PassThru
 $runtime = [ordered]@{
     pid = $process.Id; start_ticks = $process.StartTime.ToUniversalTime().Ticks; executable = $Qemu

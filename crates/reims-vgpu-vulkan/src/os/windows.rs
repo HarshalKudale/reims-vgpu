@@ -2,6 +2,7 @@
 
 mod api;
 mod clock;
+mod import;
 mod threads;
 mod vm;
 
@@ -13,13 +14,14 @@ pub use super::backing::{GuestMemoryLease, lease_guest_memory};
 pub use super::standin::{StandInSurface as WindowsSurface, StandInSurfaces as WindowsSurfaces};
 pub(crate) use super::standin::{plane_at, plane_shape, recorded_mut, ycbcr_matrix};
 pub use clock::WindowsClock;
+pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
 pub use threads::WindowsThreads;
+pub(crate) use vm::OwnMemory;
 pub use vm::WindowsVm;
 #[cfg(test)]
 pub(crate) use vm::allocate_aliasable;
 #[cfg(test)]
 pub(crate) use vm::tests::{PAGE, mapped, writable};
-pub(crate) use vm::{OwnMemory, allocate_zeros};
 
 /// The clocks.
 pub type OsClock = WindowsClock;
@@ -75,32 +77,4 @@ pub(crate) fn physical_memory() -> u64 {
     } else {
         status.total_physical
     }
-}
-
-// Host imports start with the original view; unsupported imports remain typed runtime errors.
-pub(crate) const TWINS_READ_ONLY: bool = false;
-#[derive(Debug)]
-pub(crate) struct ImportView {
-    at: std::ptr::NonNull<u8>,
-}
-impl ImportView {
-    pub(crate) fn at(&self) -> std::ptr::NonNull<u8> {
-        self.at
-    }
-    pub(crate) fn writes_kept(&self) -> bool {
-        false
-    }
-    pub(crate) fn release(
-        self,
-        _: std::ptr::NonNull<u8>,
-        inner: Option<rt::Deallocator>,
-    ) -> (Option<rt::Deallocator>, Option<rt::KeepAlive>) {
-        (inner, None)
-    }
-}
-pub(crate) fn import_view(at: std::ptr::NonNull<u8>, _: u64) -> ImportView {
-    ImportView { at }
-}
-pub(crate) fn shown_at(at: std::ptr::NonNull<u8>) -> std::ptr::NonNull<u8> {
-    at
 }

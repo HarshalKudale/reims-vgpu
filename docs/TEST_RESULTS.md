@@ -2,16 +2,35 @@
 
 | Check | Result |
 |---|---|
-| Project-only process environment | Passed |
-| Rust pin | 1.98.1 GNU installed and executed |
-| UCRT64 Clang Windows executable | Compiled and ran |
-| EFI driver link | Passed |
-| ROM object relocations | None; native binary extraction passed |
-| metal2vulkan runtime check | Passed with 8 Windows exit-guard warnings |
-| Initial SDL3 build | Failed with existing GCC; switched to native Clang/Ninja |
-| Initial metallib check | Failed on CRLF sources; LF checkout restored |
-| Initial xtask tests | 33 passed, 5 platform-specific failures; fixes in progress |
-| WHPX capability | Hypervisor absent, feature disabled |
-| VM and Liquid Glass tests | Not run; WHPX prerequisite blocked |
+| Process-only PowerShell/MSYS2 artifact paths | Passed |
+| Native C executable / EFI ROM format assertions | Passed |
+| Renderer release and QEMU 11.1.50 builds | Passed |
+| C header regeneration / drift check | Passed |
+| Windows library clippy with warnings denied | Passed |
+| xtask unit tests | 37 passed |
+| Core CPU suite, serial | 2301 passed, 1 memory-heavy case filtered |
+| Original unfiltered core run | 32 GiB Vec allocation abort; not green |
+| C API unit suite | 46 passed, 1 child fixture ignored by its parent harness |
+| Public API unit suite | 41 passed |
+| Window/input/state unit suite | 91 passed |
+| Windows VM/clock/thread/import tests | 6 passed |
+| GPU backing/alias/lifetime cases | 12 passed |
+| Native NVIDIA authored AIR pipeline | 1 passed |
+| Native NVIDIA buffer copy/fill | 1 passed |
+| metal2vulkan focused checks | 10 host-memory CPU, 1 CRT-exit, 1 native GPU passed |
+| Firmware/VM/QMP/snapshot self-checks | 48 assertions passed |
+| PCI/RAM realization, reset, QMP quit and native Win32 window | Passed in paused TCG diagnostic |
+| Missing WHPX refusal | Passed; no fallback or guest boot |
+| WHPX/Tahoe/Liquid Glass/workload FPS | Not run; prerequisite blocked |
 
-Logs are private in `.work/diagnostics/`. These are intermediate results.
+NVIDIA evidence is for RTX 4070 SUPER (10de:2783), driver 616.56. Import
+alignment is 4096 bytes. Private and shared-section memory, including two
+reversed 4 KiB placeholder views, passed bidirectional CPU/GPU assertions.
+Direct read-only imports were refused by the driver; the runtime now returns
+a typed HostMemory refusal and Reims creates writable twins. Twin CPU tests
+and the integrated backing cases passed.
+
+A native blank-frame window opened and presented while guest CPUs were
+paused. Its low present rate is not a desktop performance measurement.
+The original installer is untouched; file metadata/hash and evidence logs
+are in ignored vm/state, vm/logs and .work/diagnostics.

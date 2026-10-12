@@ -78,7 +78,7 @@ fn section_refusal(
     {
         return Some("does not contain offset + physical_length".into());
     }
-    if info.page_size == 0 || section.offset % u64::from(info.page_size) != 0 {
+    if info.page_size == 0 || !section.offset.is_multiple_of(u64::from(info.page_size)) {
         return Some("has an offset not aligned to the host page size".into());
     }
     if section.length == 0 || info.allocation_granularity == 0 {

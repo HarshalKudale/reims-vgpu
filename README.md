@@ -29,6 +29,27 @@ or a disk that already has macOS on it.
 We've tested arm64 macOS 13, 14, 15 and 26 on an M3 Max, and x86-64 macOS 26 on Linux with an RTX
 5080 laptop GPU. [docs/qemu.md](docs/qemu.md) has the details.
 
+### Windows native development branch
+
+The `windows-native-tahoe` branch adds native UCRT64/LLVM builds, WHPX,
+SDL3 Win32/Vulkan windows and PowerShell VM management. See
+[Windows setup](docs/windows-vm.md), [implementation status](docs/IMPLEMENTATION_STATUS.md)
+and [validation limits](docs/KNOWN_ISSUES.md).
+
+```powershell
+./scripts/windows/bootstrap.ps1
+./scripts/windows/build.ps1
+./scripts/windows/prepare-opencore.ps1
+./scripts/windows/prepare-vm.ps1 -Iso '<your macOS installer>'
+./scripts/windows/doctor.ps1 -RequireWhpx
+./scripts/windows/start.ps1
+```
+
+Windows Hypervisor Platform must be enabled and Windows restarted before
+normal boot. Preparation, native GPU tests and a paused TCG diagnostic have
+passed; installed Tahoe, Liquid Glass and workload FPS are not yet verified.
+Read the Apple license conditions in the setup guide and handle installer
+agreement/account input yourself.
 ### Install reims-ctl
 
 Clone the repository (without `--recursive`: QEMU's own submodules are not needed) and run:

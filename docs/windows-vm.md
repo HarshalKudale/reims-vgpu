@@ -30,7 +30,7 @@ accepts a license, enters credentials, or disables SIP or AMFI.
   A native MSYS2 QEMU package supplies the latter two and OVMF. The environment
   helper supplies its MSYS2 root; scripts also accept explicit tool paths.
 - The build's `build/qemu/qemu-system-x86_64.exe` and
-  `.work/target/dist-vulkan/ReimsVgpu.rom`. `start.ps1 -Qemu <path>` selects
+  `.work/target/dist-vulkan/share/reims-vgpu/ReimsVgpu.rom`. `start.ps1 -Qemu <path>` selects
   another build. A stock QEMU lacking the reims device is refused.
 - A matched QEMU firmware pair: `edk2-x86_64-code.fd` and
   `edk2-i386-vars.fd`. Despite the variables file's name, this is the pair

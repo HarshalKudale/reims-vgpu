@@ -29,6 +29,10 @@ impl Clock for WindowsClock {
         unsafe { api::QueryInterruptTimePrecise(&mut ticks) };
         MonoTime::from_nanos(ticks.saturating_mul(100))
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the Windows Clock implementation reads std's Windows wall clock"
+    )]
     fn now_wall(&self) -> WallTime {
         WallTime::from_nanos(
             SystemTime::now()
