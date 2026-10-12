@@ -780,6 +780,49 @@ time below includes that wait, with QEMU started at nice 0:
 Not measured: an installation run to its end, and installers and guests
 before macOS 26.
 
+### x86-64 macOS guests: the CPU model
+
+`reims-ctl` gives a new VM `Skylake-Client-noTSX-IBRS`. Under KVM the model
+sets only what CPUID reports; with `check`, QEMU drops a feature the host
+lacks and warns once per vCPU.
+
+- **Haswell-noTSX** is model 60, stepping 1. XNU panics on model 60 below
+  stepping 3 ("Haswell pre-C0 steppings are not supported",
+  `osfmk/i386/machine_check.c`, read from code). It boots only behind an
+  OpenCore that replaces CPUID leaf 1 (`Kernel > Emulate > Cpuid1Data`):
+  ULTMOS's image sets `0x00050654`, Skylake-SP stepping 4, so its guests see
+  model 85 under any `-cpu`. OSX-KVM's image (`4c378a4`) leaves it empty, and
+  OSX-KVM's own launcher uses `Skylake-Client,-hle,-rtm`.
+- **Cascadelake-Server** (v1) adds TSX, which no host here has, and AVX-512,
+  which Intel's hybrid parts (12th generation on) lack. On an AMD host with
+  AVX-512 the guest gets it, and XNU saves its registers at Intel's XSAVE
+  offsets only (`fp_avx512_offset`, `osfmk/i386/fpu.c`, read from code).
+- **Skylake-Client-noTSX-IBRS** is model 94, which XNU knows, so it boots
+  with or without the leaf 1 spoof; it is Haswell plus RDSEED, ADX, SMAP,
+  XSAVEC, PREFETCHW and IBRS, with no AVX-512.
+
+Measured on 2026-10-12 on homelab-um780 (a Ryzen 7 7840HS, Zen 4, QEMU at
+`871e0931`) with an x86-64 macOS 26.6.1 guest (25G76) on `snapshot=on`
+overlays, behind ULTMOS's OpenCore, on the RTX 3090:
+- `query-cpu-definitions` under KVM: every model above lacks only `pcid`
+  here (plus `hle` and `rtm` for Cascadelake-Server v1); on homelab-ms01 (a
+  Core i9-13900H) Haswell-noTSX and Skylake-Client-noTSX-IBRS lack nothing,
+  and Cascadelake-Server lacks TSX and all of its AVX-512.
+- Haswell-noTSX and Cascadelake-Server each reached the desktop, SSH up at
+  66 s; both report model 85 stepping 4 and `hw.cpufamily` `0x37fc219f`
+  (Skylake), and only Cascadelake-Server sets `hw.optional.avx512f`.
+- Cascadelake-Server's guest reads AMD's layout from CPUID 0xD: opmask at
+  832, ZMM_Hi256 at 896, Hi16_ZMM at 1408 (Intel's are 1088, 1152 and 1664).
+  In each of three runs, `k3` read 0 after a signal handler returned, and
+  `thread_get_state(x86_AVX512_STATE64)` gave wrong zmm16, upper zmm1 and
+  `k3`; setting that state back zeroed `k3` in the thread.
+- Single-thread, Cascadelake-Server over Haswell-noTSX: Accelerate's sgemm
+  and dgemm (1024) 37% and 34% faster, SHA-256 and SHA-512 about 20%, LZFSE
+  encode 30% and decode 12%; FFT, vImage, memcpy and memset the same.
+
+Not measured: a boot on Skylake-Client-noTSX-IBRS itself, and a boot behind
+OSX-KVM's OpenCore (it stopped at that image's picker).
+
 ### App Nap
 
 macOS naps an application none of whose windows the person sees: QEMU's

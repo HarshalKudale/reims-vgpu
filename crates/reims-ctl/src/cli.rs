@@ -236,7 +236,7 @@ pub struct CreateArgs {
     /// x86-64: OVMF's variables
     #[arg(long)]
     pub firmware_vars: Option<PathBuf>,
-    /// x86-64: QEMU's CPU model (default Haswell-noTSX)
+    /// x86-64: QEMU's CPU model (default Skylake-Client-noTSX-IBRS)
     #[arg(long)]
     pub cpu_model: Option<String>,
     /// x86-64: CPU flags after the model's

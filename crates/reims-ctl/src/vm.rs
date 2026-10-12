@@ -334,8 +334,11 @@ pub struct Q35 {
     pub disk_port: u32,
 }
 
+/// Skylake-Client without TSX: macOS boots on it without an OpenCore CPUID spoof, and it has no
+/// AVX-512, whose state XNU mishandles on AMD hosts (docs/qemu.md, "x86-64 macOS guests: the CPU
+/// model").
 pub fn default_cpu_model() -> String {
-    "Haswell-noTSX".into()
+    "Skylake-Client-noTSX-IBRS".into()
 }
 
 pub fn default_cpu_flags() -> String {
