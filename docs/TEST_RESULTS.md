@@ -26,6 +26,9 @@
 | Tahoe 26.4 recovery UI, sw_vers, SIP | Passed on eight CPUs; 25E246 and SIP enabled |
 | Target GPT/APFS format and offline snapshot | Passed on the new 128 GiB overlay |
 | Recovery shutdown | Guest Terminal command passed; QMP powerdown timed out |
+| Installation stage 1 | Copied about 17.76 GiB and requested restart |
+| WHPX warm restart after stage 1 | Failed XSAVE reads/VP exit 4; process restart preserved disk |
+| Guest clock calibration | XNU 6.4 GHz disagrees with hypervisor/native host about 3.187 GHz |
 | Installed Tahoe/guest Metal/Liquid Glass/workload FPS | Pending installation |
 
 NVIDIA evidence is for RTX 4070 SUPER (10de:2783), driver 616.56. Import

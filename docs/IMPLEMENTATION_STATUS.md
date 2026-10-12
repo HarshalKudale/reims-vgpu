@@ -77,7 +77,13 @@ owner; keep passwords out of source files, command lines and logs.
 The accompanying Apple license must be considered; see
 windows-vm.md and windows-native-audit.md.
 
-License acceptance, installation, desktop/reboot, guest Metal, Liquid Glass
+The user accepted the installer agreement. Stage 1 copied about 17.76 GiB
+and restarted, exposing a WHPX XSAVE/warm-reset failure. Its disk was saved
+in the offline install-stage1 snapshot and a fresh QEMU process reached the
+target's macOS Installer entry. Stage 2 is continuing. An XNU/hypervisor
+clock-frequency discrepancy is being investigated separately.
+
+Completed installation, desktop/reboot, guest Metal, Liquid Glass
 and workload FPS
 remain unverified. No 60/120 FPS result is claimed. Private evidence is in
 .work/diagnostics/ and vm/logs/. Generated binaries, guests and logs are ignored.

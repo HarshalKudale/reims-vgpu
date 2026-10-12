@@ -7,8 +7,11 @@
 2. OpenPartitionDxe detects the APM/HFS+ installer. Choose its observed
    OpenCore menu entry with QMP send-key. The picker waits for selection.
    The core/thread count MSR matches eight CPUs; recovery reaches its GUI.
-3. The 128 GiB target is GPT/APFS with a Reims volume. Launch the installer
-   and install there after the user accepts the agreement. Use the account
+3. The user accepted the agreement, and stage 1 copied its payload. The
+   offline install-stage1 snapshot preserves that disk. Continue from the
+   macOS Installer entry on the target, not the original media entry.
+   Diagnose the WHPX XSAVE/warm-reset failure and XNU clock calibration.
+   Use the account
    and region supplied by the owner; keep passwords out of source files,
    command lines and logs.
    Preserve SIP/AMFI settings and use the overlay chain.

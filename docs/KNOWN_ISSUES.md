@@ -2,10 +2,19 @@
 
 - WHPX boots the Tahoe 26.4 recovery UI with eight CPUs after correcting
   Haswell stepping and the core/thread count MSR. GPT/APFS preparation is
-  complete; license acceptance and installation remain pending.
+  complete. The user accepted the agreement; installation stage 1 copied
+  approximately 17.76 GiB and reached its automatic restart.
+- That warm reset failed under WHPX: XSAVE reads returned HRESULT 80370301,
+  then virtual processors exited with unrecoverable exception code 4 and
+  QEMU paused. A full process restart preserved the disk and reached its
+  new macOS Installer entry. Warm reset still needs a source fix and proof.
+- XNU reported RTCLOCK 6.4 GHz, while the Windows hypervisor capability and
+  native RDTSC/QPC measurement report about 3.187 GHz. Clock calibration is
+  being investigated; installer remaining-time and performance claims need
+  this discrepancy resolved.
 - Recovery ignored QMP system_powerdown within 15 seconds. Its Terminal
   shutdown command exited cleanly; installed-system shutdown is unverified.
-- Tahoe installation, installer agreement, account setup, desktop/reboot,
+- Completed installation, account setup, desktop/reboot,
   Finder/Dock/Safari, Liquid Glass and sustained FPS have not been exercised.
 - One legacy core test, tasks::shared::tests::data_from_virtual_offset::
   a_length_past_any_task_raises, requires a normal 32 GiB Vec allocation.
