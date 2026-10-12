@@ -440,6 +440,32 @@ views. When a guest's RAM is leased, the library warns if the RAM, in 16 KiB
 pieces, would not fit. `sysctl -w vm.max_map_count=1048576` covers a 12 GiB
 guest.
 
+### Linux hosts: AMD GPUs and udmabuf
+
+RADV refuses to import pages with a file behind them as host memory, and the
+guest's RAM and the library's views are all memfd pages, so a macOS 26 guest
+on an AMD GPU died at its first no-copy buffer: `reims-vgpu: fatal: platform
+call newBufferWithBytesNoCopy:length:options:deallocator:: the Vulkan runtime
+refused it: unsupported: Unsupported { feature: HostMemory, ... }` (Radeon
+780M, RADV of Mesa 26.0.8, Linux 7.0, 2026-10-11). Where the pointer import is
+refused, the runtime now imports dma-bufs of the same pages, which the library
+makes with `/dev/udmabuf`, cut into chunks within udmabuf's limits as the host
+has them (`crates/reims-vgpu-vulkan/src/os/linux/dma_buf.rs`). The device node
+is the `kvm` group's on Ubuntu.
+
+What the chunks must hold, measured on an RTX 3090 host (where every import is
+host memory) with that guest, 14 GiB, one 1920x1080 display, on 2026-10-11:
+at the idle desktop, 829 imports, the largest 63.3 MiB, 19 of more than 1024
+runs of file pages and the most 16,201 (4 KiB pieces); with Safari open on
+wikipedia.org, 4,551 imports and 29 of more than 1024 runs. At udmabuf's
+defaults (1024 runs, 64 MiB) the 16,201-run import is 16 chunks.
+
+On the Radeon 780M with udmabuf at its defaults and metal2vulkan `11715e2a3f`
+(2026-10-12), the guest cold-booted to its desktop, and Safari loaded
+wikipedia.org and quit with no death: 5,119 dma-buf requests, textures' own
+among them, none refused; 5,095 took one dma-buf, 19 two, 2 three, 2 seven and
+1 sixteen.
+
 ### Linux hosts: NVIDIA's pipeline import budget
 
 Measured on an RTX 3090 and an RTX 5080 Laptop GPU, NVIDIA driver

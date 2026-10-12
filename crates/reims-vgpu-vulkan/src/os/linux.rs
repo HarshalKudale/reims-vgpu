@@ -7,6 +7,7 @@
 
 mod budget;
 mod clock;
+mod dma_buf;
 mod files;
 mod import;
 mod surface;
@@ -24,7 +25,9 @@ pub use surface::{LinuxSurface, LinuxSurfaces};
 pub use threads::LinuxThreads;
 pub use vm::LinuxVm;
 
-pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
+pub(crate) use import::{
+    TWINS_READ_ONLY, allocate_zeros, dma_buf_refusal, host_memory, import_view, shown_at,
+};
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, ycbcr_matrix};
 #[cfg(test)]
 pub(crate) use vm::allocate_aliasable;

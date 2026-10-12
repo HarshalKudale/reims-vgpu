@@ -52,6 +52,10 @@ pins, and Cargo fetches metal2vulkan from its public repository, at the commit t
    12 GiB guest, and a file in `/etc/sysctl.d` keeps it. `scripts/install-ctl.sh` and `reims-ctl`
    warn when it is too low.
 
+   On an AMD GPU, the guest's memory reaches the GPU through `/dev/udmabuf`, so you need to be in
+   the group that owns it (`kvm` on Ubuntu, the same group as `/dev/kvm`). `reims-ctl` warns when a
+   VM on an AMD GPU can't open it.
+
 2. **Get OpenCore and an installer with [OSX-KVM](https://github.com/kholia/OSX-KVM)** (or ULTMOS).
    Follow that project's docs to fetch the recovery image and build OpenCore. You only need its
    pieces, not its launcher: `reims-ctl` copies the OpenCore image into the VM and finds OVMF beside

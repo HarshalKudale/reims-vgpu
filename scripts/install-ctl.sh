@@ -175,6 +175,11 @@ else
   if ((maps < 1048576)); then
     warn "vm.max_map_count is $maps: a 12 GiB guest needs about 1048576 (sudo sysctl -w vm.max_map_count=1048576, and a file in /etc/sysctl.d to keep it)"
   fi
+  # An AMD GPU (RADV) imports the guest's memory as dma-bufs made by udmabuf
+  # (docs/qemu.md, "Linux hosts: AMD GPUs and udmabuf").
+  if grep -qsx 0x1002 /sys/class/drm/*/device/vendor && [[ ! -r /dev/udmabuf || ! -w /dev/udmabuf ]]; then
+    warn "/dev/udmabuf is not usable by you: a VM on an AMD GPU needs it for the guest's memory (add yourself to the group that owns it, kvm on Ubuntu: sudo usermod -aG kvm \$USER; log in again)"
+  fi
 fi
 
 if ! command -v cargo >/dev/null 2>&1 && [[ -x "$HOME/.cargo/bin/cargo" ]]; then
