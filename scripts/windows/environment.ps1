@@ -34,6 +34,7 @@ $env:PATH = (@(
     (Join-Path $env:CARGO_HOME 'bin'),
     (Join-Path $env:RUSTUP_HOME "toolchains\$env:RUSTUP_TOOLCHAIN\bin"),
     (Join-Path $MsysRoot 'ucrt64\bin'),
+    (Join-Path $env:ProgramFiles 'Git\cmd'),
     (Join-Path $MsysRoot 'usr\bin'),
     $env:PATH
 ) -join [IO.Path]::PathSeparator)
