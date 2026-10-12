@@ -66,6 +66,7 @@ try {
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx') 'WHPX is the sole default accelerator'
     Assert-Condition ('tcg' -notin $command) 'No automatic TCG fallback'
+    Assert-Condition ('-no-shutdown' -in $command) 'Normal power-off retains the QEMU process'
     Assert-Condition ($command[$command.IndexOf('-L') + 1] -eq (ConvertTo-ReimsQemuPath (Join-Path $testRoot 'vendor/qemu/pc-bios'))) 'ROM lookup is independent of the QEMU build directory'
     Assert-Condition (($command | Where-Object { $_ -like 'id=installer,*' }) -match 'snapshot=on') 'APM original is protected by an overlay'
     Assert-Condition (($command | Where-Object { $_ -like 'id=opencore,*' }) -match 'snapshot=on') 'OpenCore template is protected by an overlay'
@@ -73,6 +74,7 @@ try {
     Assert-Condition (($command -join ' ') -match 'tcp:127.0.0.1:4444' -and ($command -join ' ') -match 'hostfwd=tcp:127.0.0.1:2222') 'QMP and SSH stay on localhost'
     $diagnostic = Get-ReimsQemuArguments $config $testRoot -DiagnosticTcg
     Assert-Condition ('tcg' -in $diagnostic -and '-S' -in $diagnostic) 'Explicit TCG diagnostics remain paused'
+    Assert-Condition ('-no-shutdown' -notin $diagnostic) 'Diagnostics can exit without waiting for a guest shutdown'
     $config.media_kind = 'cdrom'
     $cd = Get-ReimsQemuArguments $config $testRoot
     Assert-Condition (($cd | Where-Object { $_ -like 'id=installer,*' }) -match 'media=cdrom,readonly=on') 'ISO9660 is a read-only CD'
@@ -150,6 +152,8 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
         run_directory = Join-Path $testRoot 'vm/logs/mock'; disk = $restored.active_disk; diagnostic_only = $false
     }
     New-Item -ItemType Directory -Force -Path $runtime.run_directory | Out-Null
+    $launchArguments = Get-ReimsQemuArguments $restored $runtime.run_directory
+    Write-ReimsJson (Join-Path $runtime.run_directory 'command.json') @{ executable = $python; arguments = $launchArguments; headless = $false }
     'reims-vgpu: fatal: fixture only' | Set-Content -LiteralPath (Join-Path $runtime.run_directory 'stderr.log')
     Write-ReimsJson (Join-Path $testRoot 'vm/state/runtime.json') $runtime
     Assert-Condition (Invoke-ReimsQmp $runtime 'query-status').running 'QMP skips events and unrelated response IDs'
@@ -176,8 +180,31 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     $summary = Get-Content -Raw -LiteralPath (Join-Path $benchmark.FullName 'summary.json') | ConvertFrom-Json
     Assert-Condition ($summary.sample_count -ge 1 -and $summary.display_stats -eq 'no samples reported during this interval') 'Benchmark reports measured host samples and absent frame evidence'
     & (Join-Path $testScripts 'stop.ps1') -TimeoutSeconds 2 | Out-Null
+    Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').status -eq 'shutdown') 'Stop waits for guest power-off'
+    Assert-Condition ((Get-ReimsVmProcess $runtime).Id -eq $mock.Id) 'Power-off retains the recorded process'
+    Assert-Throws { Assert-ReimsVmStopped } 'Stop this VM'
+    Assert-Throws { Invoke-ReimsQmp $runtime 'cont' } 'Resetting the Virtual Machine'
+    $changedConfig = $restored.PSObject.Copy()
+    $changedConfig.cpus++
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $changedConfig
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python } 'Launch settings changed'
+    Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').status -eq 'shutdown') 'Changed settings do not reset the existing VM'
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $restored
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -WithoutInstaller } 'Launch settings changed'
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -Headless } 'Launch settings changed'
+    & (Join-Path $testScripts 'start.ps1') -Qemu $python | Out-Null
+    Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').running -and (Get-ReimsVmProcess $runtime).Id -eq $mock.Id) 'Start resets and powers on the same process'
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python } 'VM is running'
+    Invoke-ReimsQmp $runtime 'system_reset' | Out-Null
+    Assert-Condition (Invoke-ReimsQmp $runtime 'query-status').running 'A running guest reset keeps running'
+    Invoke-ReimsQmp $runtime 'stop' | Out-Null
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python } 'VM is paused'
+    Assert-Throws { & (Join-Path $testScripts 'stop.ps1') -TimeoutSeconds 1 } 'Guest has not shut down'
+    Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').status -eq 'paused') 'Shutdown timeout neither resumes nor kills a paused guest'
+    Invoke-ReimsQmp $runtime 'cont' | Out-Null
+    & (Join-Path $testScripts 'stop.ps1') -Exit -TimeoutSeconds 2 | Out-Null
     $mock.WaitForExit(5000) | Out-Null
-    Assert-Condition $mock.HasExited 'Stop uses QMP powerdown on the recorded process'
+    Assert-Condition $mock.HasExited 'Explicit Exit quits QEMU after guest power-off'
 
     if ($PreparedArtifactsRoot) {
         $media = Get-Content -Raw -LiteralPath (Join-Path $PreparedArtifactsRoot 'vm/state/media.json') | ConvertFrom-Json

@@ -162,6 +162,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         $qemuArguments += '-drive', "id=installer,if=none,format=raw,$protection,file=$media"
         $qemuArguments += '-device', $(if ($Config.media_kind -eq 'disk') { 'ide-hd,bus=sata.4,drive=installer' } else { 'ide-cd,bus=sata.4,drive=installer' })
     }
+    if (!$DiagnosticTcg) { $qemuArguments += '-no-shutdown' }
     if ($Paused -or $DiagnosticTcg) { $qemuArguments += '-S' }
     return $qemuArguments
 }
@@ -171,8 +172,35 @@ $config = Get-ReimsVmConfig
 if (!$Qemu) { $Qemu = Join-Path $ProjectRoot 'build/qemu/qemu-system-x86_64.exe' }
 $Qemu = [IO.Path]::GetFullPath($Qemu)
 $run = Join-Path $ProjectRoot ("vm/logs/" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
-$whpx = Get-ReimsWhpxStatus
 $qemuArgs = Get-ReimsQemuArguments $config $run -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
+$runtime = Get-ReimsRuntime
+if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
+    $status = Invoke-ReimsQmp $runtime 'query-status'
+    if ($status.status -ne 'shutdown') {
+        throw "VM is $($status.status). Use qmp.ps1 to control it; start only powers on a shut-down VM."
+    }
+    $previous = Get-Content -Raw -LiteralPath (Join-Path $runtime.run_directory 'command.json') | ConvertFrom-Json
+    $expected = Get-ReimsQemuArguments $config $runtime.run_directory -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
+    if (![string]::Equals($runtime.executable, $Qemu, [StringComparison]::OrdinalIgnoreCase) -or
+        $previous.headless -ne [bool]$Headless -or
+        (ConvertTo-Json -InputObject $previous.arguments -Compress) -ne (ConvertTo-Json -InputObject $expected -Compress)) {
+        throw 'Launch settings changed. Run stop.ps1 -Exit before starting with different disks, firmware, devices or options.'
+    }
+    Invoke-ReimsQmp $runtime 'system_reset' | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $status = Invoke-ReimsQmp $runtime 'query-status'
+        if ($status.status -eq 'prelaunch') { break }
+        if ($status.status -ne 'shutdown' -or [DateTime]::UtcNow -gt $deadline) {
+            throw "VM reset did not reach prelaunch: $($status.status)."
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+    if (!$Paused) { Invoke-ReimsQmp $runtime 'cont' | Out-Null }
+    "Powered on the existing QEMU process, PID $($runtime.pid). Logs: $($runtime.run_directory)"
+    return
+}
+$whpx = Get-ReimsWhpxStatus
 $launch = [ordered]@{
     executable = $Qemu; arguments = $qemuArgs; whpx = $whpx
     headless = [bool]$Headless; diagnostic_only = [bool]$DiagnosticTcg

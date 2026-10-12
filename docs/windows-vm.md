@@ -115,10 +115,21 @@ Before a guest boot, stop competing GPU tests/builds as required by
 
 ```powershell
 ./scripts/windows/start.ps1
-./scripts/windows/stop.ps1
+./scripts/windows/stop.ps1                      # guest power-off; keep QEMU
+./scripts/windows/start.ps1                     # power on the same process
+./scripts/windows/stop.ps1 -Exit                # clean shutdown and exit QEMU
 ./scripts/windows/start.ps1 -WithoutInstaller     # after installation
-./scripts/windows/stop.ps1 -Force                # explicit power-off after timeout
+./scripts/windows/stop.ps1 -Force                # discard unsaved work and exit QEMU
 ```
+
+Normal launches use `-no-shutdown`: a guest restart stays in QEMU, and a
+guest power-off leaves QMP available in the `shutdown` state. `start.ps1`
+resets that powered-off machine and resumes its CPUs in the same process.
+It refuses to restart a running or paused guest, or silently reuse different
+launch settings. Use `qmp.ps1 -Command cont` to resume an intentional pause.
+Use `stop.ps1 -Exit` before changing attached disks, firmware, launch options
+or the QEMU executable, and before an offline snapshot. The powered-off
+process still holds its disks open.
 
 The guest installer and Setup Assistant remain interactive. Scripts do not
 accept agreements, enter passwords, alter guest security, or automate an
@@ -169,6 +180,7 @@ No desktop automation or foreground window is needed:
 ./scripts/windows/qmp.ps1 -Command query-block
 ./scripts/windows/qmp.ps1 -Command stop            # pause CPUs
 ./scripts/windows/qmp.ps1 -Command cont            # resume CPUs
+./scripts/windows/qmp.ps1 -Command system_reset    # hard reset in this process
 ./scripts/windows/qmp.ps1 -Command send-key -Arguments @{ keys = @(@{ type = 'qcode'; data = 'ret' }); 'hold-time' = 100 }
 ./scripts/windows/qmp.ps1 -Command screendump -Arguments @{ filename = 'D:/git/reims/vm/logs/guest.ppm' }
 ```
