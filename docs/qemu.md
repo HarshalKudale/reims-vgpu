@@ -457,14 +457,26 @@ records were each suspected first and ruled out.
 
 ### x86-64 macOS guests: Metal's error mode
 
-An x86-64 macOS guest needs one setting, made once inside the guest:
+An x86-64 macOS guest needs one setting, made once inside the guest. On a
+desktop that comes up:
 
 ```sh
 sudo defaults write /Library/Preferences/.GlobalPreferences METAL_ERROR_MODE -int 5
 ```
 
-Without it the guest's icon service ends as it starts, again and again, and
-apps wait minutes for their icons. Mode 5, the same as
+A new install's desktop does not come up without it, so there it is made
+from macOS Recovery (OpenCore's Recovery entry, then Utilities > Terminal),
+on the Data volume, followed by `reboot`:
+
+```sh
+cd /Volumes/*Data/Library/Preferences
+defaults write "$PWD/.GlobalPreferences" METAL_ERROR_MODE -int 5
+chmod 644 .GlobalPreferences.plist
+```
+
+Without it the guest's icon service ends as it starts, again and again:
+apps wait minutes for their icons, and a guest with no icon cache yet, as a
+new install has, shows only its wallpaper. Mode 5, the same as
 `MTL_ERROR_MODE=nslog`, has Metal log an error report and go on rather than
 end the process. Every process of every user reads the key, root's
 included, from its next launch on, so a boot needs nothing else.
@@ -492,6 +504,42 @@ Measured on an RTX 5080 Laptop GPU host with a macOS 26.6.1 guest on 2026-10-11:
   is the only Metal error report any process logs.
 - Nothing of the archive reaches the host: QEMU's log has no line of it,
   with or without the key.
+
+A new install, and the key made from Recovery. Measured on an RTX 3090 host
+(Ubuntu 26.04, NVIDIA 615.71.09) on 2026-10-12, with a macOS 26.6.1 guest on
+a qcow2 overlay of its disk, and the library and QEMU at `9b2c5452`:
+- With the key, the desktop was up 60 s after the picker, with no exec
+  fault.
+- With the key deleted and the icon caches kept, the desktop was up by
+  80 s. iconservicesagent, `com.apple.dock.extra` and Spotlight each ended
+  every 10-20 s, and the host logged an exec fault for most of the ends.
+- With the key deleted and the icon caches deleted too, as a new install
+  has none (`/Library/Caches/com.apple.iconservices.store`, and the user's
+  `com.apple.dock.iconcache`, `com.apple.dock.extra`,
+  `com.apple.iconservices` and `com.apple.iconservicesagent` under `getconf
+  DARWIN_USER_CACHE_DIR`), and the host's shader cache empty: only the
+  wallpaper, with no menu bar, Dock or widgets, still at 5 min. The Dock's
+  main thread waited in `-[ISConcreteIcon generateImageWithDescriptor:]`,
+  in `xpc_connection_send_message_with_reply_sync` to iconservicesagent,
+  which had ended 15 times. A beta tester's new install on an RTX 3050
+  Laptop GPU host (NVIDIA 615.71.09) showed the same: the wallpaper only,
+  and the same exec faults in QEMU's log.
+- Recovery boots on BAR 2 ("x86-64 macOS guests: installers and recovery",
+  below) to its window by 60 s after the picker, with the Data volume at
+  `/Volumes/<name> - Data` and no password asked. The commands above
+  brought that guest's desktop back by 80 s after the picker, with no exec
+  fault.
+- Two traps on the way there. `defaults write
+  /Volumes/*\ -\ Data/Library/Preferences/.GlobalPreferences ...` expands
+  no glob, since no file has that name without `.plist`: it made a literal
+  `/Volumes/* - Data` in Recovery's RAM disk and wrote the key there. The
+  `cd` expands the glob through the directory. And `defaults` leaves the
+  file at mode 0600, where the user's processes read no key (`defaults
+  read` as the user finds no such pair, as root it finds 5), so the icon
+  service went on ending until `chmod 644`.
+- Finder's Dock icon, asked for while the icon service was failing, stayed
+  blank after the fix, also after `killall Dock`. Deleting the user's
+  `com.apple.dock.iconcache` and then `killall Dock` brought it back.
 
 No value the host supplies decides any of this, so Apple's own host would
 end an x86-64 macOS 26 guest's icon service the same way. Read from the
@@ -538,6 +586,13 @@ Laptop GPU host on 2026-10-11 (macOS 26.6.1, one library build):
   exec after the guest's teardown. A host that decoded faster would only
   narrow the window: some faulting execs started after their process had
   ended.
+- Such an exec can also end QEMU. A render pipeline it makes resolves its
+  functions from entries already emptied, gets nil for them ("pipeline
+  function N not found, given to Metal as nil"), and dies where Metal
+  aborts at a render descriptor with no vertex function, as Apple's
+  framework was measured to (docs/testing.md, `render_objects_malformed_*`
+  and `interplay_lifetime_held_pipeline_function_retyped`). Seen once, in
+  the RTX 3050 beta tester's log of a boot before the key was set.
 
 ### x86-64 macOS guests: thumbnail extensions
 

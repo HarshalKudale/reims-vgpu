@@ -68,14 +68,33 @@ pins, and Cargo fetches metal2vulkan from its public repository, at the commit t
    overlay; or in place), and `reims-ctl eject mac` takes the installer out once macOS is
    installed.
 
-3. **Set Metal's error mode in the guest**, once:
+3. **Set Metal's error mode in the guest**, once. Without it, macOS's icon service crashes as soon
+   as it starts, and a fresh install never gets past its wallpaper: no menu bar, no Dock. Since
+   there's no desktop yet, you set it from macOS Recovery:
+
+   1. Start the VM and pick the Recovery entry in OpenCore's picker (press Space if it isn't
+      shown).
+   2. In Recovery, open Utilities > Terminal and type:
+
+      ```sh
+      cd /Volumes/*Data/Library/Preferences
+      defaults write "$PWD/.GlobalPreferences" METAL_ERROR_MODE -int 5
+      chmod 644 .GlobalPreferences.plist
+      reboot
+      ```
+
+      Don't skip the `chmod`: without it, macOS can't read the setting.
+   3. Pick macOS in the picker. The desktop should come up.
+
+   If you already have a desktop, run this in its Terminal instead, then restart:
 
    ```sh
    sudo defaults write /Library/Preferences/.GlobalPreferences METAL_ERROR_MODE -int 5
    ```
 
-   Without it the guest's icon service crash-loops, and apps wait minutes for their icons
-   ([docs/qemu.md](docs/qemu.md), "x86-64 macOS guests: Metal's error mode").
+   If a Dock icon stays blank afterwards, clear the Dock's icon cache:
+   `rm -rf "$(getconf DARWIN_USER_CACHE_DIR)com.apple.dock.iconcache"; killall Dock`.
+   [docs/qemu.md](docs/qemu.md) ("x86-64 macOS guests: Metal's error mode") has the details.
 
 ### arm64 guest on an Apple silicon Mac (HVF / vmapple)
 
