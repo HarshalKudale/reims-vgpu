@@ -1423,8 +1423,13 @@ impl App {
                             Style::new().dim(),
                         )));
                     }
-                    // Below its settings, what starting it warns of on this host.
-                    for w in runtime::warnings(vm, self.host) {
+                    // Below its settings, what in them its guest does not work with, then
+                    // what starting it warns of on this host.
+                    let incompatible = vm.config.incompatibilities();
+                    for w in incompatible
+                        .into_iter()
+                        .chain(runtime::warnings(vm, self.host))
+                    {
                         lines.push(Line::from(""));
                         lines.push(Line::from(Span::styled(w, Style::new().fg(Color::Yellow))));
                     }
