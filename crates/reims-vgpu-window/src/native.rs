@@ -11,14 +11,14 @@
 //!   the window's shell and cursor are SDL's shared ones (`sdl`), with Linux's side in
 //!   `native/linux/sdl.rs`.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub use linux::FrameSink;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) use linux::{
     Surface, close, cursor_changed, guest_mode_changed, host_screens, open, sdl as sdl_os,
 };

@@ -172,6 +172,9 @@ const COMMITTED: &str = "metallibs";
 fn main() -> Result<(), String> {
     let manifest = PathBuf::from(var("CARGO_MANIFEST_DIR")?);
     let out = PathBuf::from(var("OUT_DIR")?);
+    if var("CARGO_CFG_TARGET_OS")? == "windows" {
+        windows_import_library(&out)?;
+    }
     println!("cargo:rerun-if-env-changed=RVG_METALLIB_DIR");
     println!("cargo:rerun-if-env-changed=RVG_METALLIB_EXPORT");
     let steps = steps(&manifest);
@@ -195,6 +198,25 @@ fn main() -> Result<(), String> {
         Some(dir) => export(&steps, &out, Path::new(&dir)),
         None => Ok(()),
     }
+}
+
+/// MinGW does not ship a KernelBase import library for the placeholder APIs.
+/// Build the three imports from their documented names with the native LLVM tool.
+fn windows_import_library(out: &Path) -> Result<(), String> {
+    let definition = out.join("kernelbase.def");
+    std::fs::write(&definition, "LIBRARY kernelbase.dll\nEXPORTS\nVirtualAlloc2\nMapViewOfFile3\nUnmapViewOfFile2\nQueryInterruptTimePrecise\n")
+        .map_err(|e| format!("{}: {e}", definition.display()))?;
+    let library = out.join("libkernelbase.a");
+    let status = std::process::Command::new("llvm-dlltool")
+        .args(["-m", "i386:x86-64", "-d"])
+        .arg(&definition)
+        .arg("-l")
+        .arg(&library)
+        .status()
+        .map_err(|e| format!("llvm-dlltool: {e}"))?;
+    if !status.success() { return Err(format!("llvm-dlltool failed: {status}")); }
+    println!("cargo:rustc-link-search=native={}", out.display());
+    Ok(())
 }
 
 /// Compiles every metallib into `out` with Apple's tools (module docs).

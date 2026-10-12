@@ -28,10 +28,11 @@
 //!
 //! The table is a leaf lock: nothing is called under it.
 
+use super::BackingHandle;
 use std::collections::BTreeMap;
-use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use reims_vgpu_core::num::ToU64 as _;
 use reims_vgpu_core::sync::Mutex;
 
@@ -41,7 +42,7 @@ use crate::os::GuestRamFile;
 #[derive(Clone, Debug)]
 pub(crate) struct Backing {
     /// The file, held while any entry or view names it.
-    pub(crate) fd: Arc<OwnedFd>,
+    pub(crate) file: Arc<BackingHandle>,
     /// The file offset of the range's first byte.
     pub(crate) offset: u64,
 }
@@ -95,13 +96,14 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
 /// protection (module docs).
 fn joined(a_first: u64, a: &Run, b_first: u64, b: &Run) -> bool {
     a.end == b_first
-        && Arc::ptr_eq(&a.backing.fd, &b.backing.fd)
+        && Arc::ptr_eq(&a.backing.file, &b.backing.file)
         && a.backing.offset + (a.end - a_first) == b.backing.offset
         && a.prot == b.prot
 }
 
 impl Table {
     /// The kernel's mappings the runs take (module docs).
+    #[cfg(target_os = "linux")]
     fn mappings(&self) -> usize {
         self.runs.len() - self.joins
     }
@@ -194,13 +196,14 @@ impl Table {
 
 /// The kernel's mappings the table's runs take (module docs): every view the library made and
 /// every range a view can be made of.
+#[cfg(target_os = "linux")]
 pub(crate) fn mappings() -> u64 {
     TABLE.lock().mappings().to_u64()
 }
 
 /// The kernel's mappings the table's runs in `first..end` take, as [`mappings`] counts them
 /// (tests: a range's count to set beside the kernel's).
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn mappings_between(first: u64, end: u64) -> u64 {
     let table = TABLE.lock();
     let mut count = 0u64;
@@ -256,7 +259,7 @@ pub(crate) fn pieces(first: u64, length: u64) -> Option<Vec<Piece>> {
             at: at - first,
             length: to - at,
             backing,
-            prot: libc::PROT_READ | libc::PROT_WRITE,
+            prot: 3,
         });
         at = to;
     }
@@ -276,7 +279,7 @@ pub(crate) fn protect(first: u64, length: u64, prot: i32) {
 /// lies in neither.
 pub(crate) fn readable(first: u64, length: u64) -> Option<bool> {
     let pieces = pieces(first, length)?;
-    Some(pieces.iter().all(|p| p.prot & libc::PROT_READ != 0))
+    Some(pieces.iter().all(|p| p.prot & 1 != 0))
 }
 
 /// Whether a byte of `length` bytes from `first` lies in a registration.
@@ -341,7 +344,7 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
         .into_iter()
         .map(|r| {
             let backing = Backing {
-                fd: r.fd,
+                file: r.backing(),
                 offset: r.offset,
             };
             Registration::new(r.host, r.length, backing)
@@ -351,7 +354,10 @@ pub fn lease_guest_memory(ranges: impl IntoIterator<Item = GuestRamFile>) -> Gue
         .iter()
         .map(|r| r.end - r.first)
         .fold(0u64, u64::saturating_add);
-    super::budget::warn_if_short(guest_ram);
+    #[cfg(target_os = "linux")]
+    super::linux::budget::warn_if_short(guest_ram);
+    #[cfg(windows)]
+    let _ = guest_ram;
     GuestMemoryLease {
         _registrations: registrations,
     }
@@ -361,7 +367,7 @@ impl Registered {
     /// Whether this registers `first..end` over `backing`.
     fn is(&self, first: u64, end: u64, backing: &Backing) -> bool {
         (self.first, self.end, self.backing.offset) == (first, end, backing.offset)
-            && Arc::ptr_eq(&self.backing.fd, &backing.fd)
+            && Arc::ptr_eq(&self.backing.file, &backing.file)
     }
 }
 
@@ -381,18 +387,18 @@ impl Drop for Registration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// A file for the tests' backings.
-    fn file() -> Arc<OwnedFd> {
+    fn file() -> Arc<BackingHandle> {
         let name = c"rvg-files-test";
         // SAFETY: a NUL-terminated name; the descriptor is owned from here on.
         let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
         assert!(fd >= 0);
         // SAFETY: a descriptor this test just made, owned once.
-        Arc::new(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) })
+        Arc::new(unsafe { <BackingHandle as std::os::fd::FromRawFd>::from_raw_fd(fd) })
     }
 
     /// The pieces' (offset in the range, length, file offset).
@@ -412,11 +418,11 @@ mod tests {
         let f = file();
         let base = 0x7a00_0000_0000;
         let backing = |offset| Backing {
-            fd: Arc::clone(&f),
+            file: Arc::clone(&f),
             offset,
         };
         let held = Registration::new(base, 0x10_000, backing(0x100_000));
-        record(base + 0x20_000, 0x2000, backing(0x5000), libc::PROT_READ);
+        record(base + 0x20_000, 0x2000, backing(0x5000), 1);
         assert_eq!(
             shape(&pieces(base + 0x1000, 0x2000).unwrap()),
             [(0, 0x2000, 0x101_000)]
@@ -449,16 +455,11 @@ mod tests {
         let f = file();
         let base = 0x7b00_0000_0000;
         let backing = |offset| Backing {
-            fd: Arc::clone(&f),
+            file: Arc::clone(&f),
             offset,
         };
-        record(
-            base,
-            0x4000,
-            backing(0x10_000),
-            libc::PROT_READ | libc::PROT_WRITE,
-        );
-        record(base + 0x1000, 0x1000, backing(0x90_000), libc::PROT_READ);
+        record(base, 0x4000, backing(0x10_000), 3);
+        record(base + 0x1000, 0x1000, backing(0x90_000), 1);
         assert_eq!(
             shape(&pieces(base, 0x4000).unwrap()),
             [
@@ -485,7 +486,7 @@ mod tests {
         let ram = |host, length, offset| GuestRamFile {
             host,
             length,
-            fd: Arc::clone(&f),
+            file: Arc::clone(&f),
             offset,
         };
         let lease =
@@ -513,10 +514,10 @@ mod tests {
         let mut t = Table::default();
         let base = 0x1000_0000;
         let page = 0x1000;
-        let rw = libc::PROT_READ | libc::PROT_WRITE;
+        let rw = 3;
         let at = |i: u64| base + i * page;
-        let b = |fd: &Arc<OwnedFd>, offset| Backing {
-            fd: Arc::clone(fd),
+        let b = |fd: &Arc<BackingHandle>, offset| Backing {
+            file: Arc::clone(fd),
             offset,
         };
         // Four pages of one file in order: one mapping.
@@ -529,7 +530,7 @@ mod tests {
         t.record(at(5), at(6), b(&g, 0xa000), rw);
         assert_eq!(t.mappings(), 3);
         // The second page read-only cuts the first mapping in three; read and write again, one.
-        t.protect(at(1), at(2), libc::PROT_READ);
+        t.protect(at(1), at(2), 1);
         assert_eq!(t.mappings(), 5);
         t.protect(at(1), at(2), rw);
         assert_eq!(t.mappings(), 3);
@@ -552,7 +553,7 @@ mod tests {
         let f = file();
         let base = 0x7c00_0000_0000;
         let backing = || Backing {
-            fd: Arc::clone(&f),
+            file: Arc::clone(&f),
             offset: 0,
         };
         let first = Registration::new(base, 0x1000, backing());

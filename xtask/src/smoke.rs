@@ -222,11 +222,20 @@ pub fn dyld_vars(vars: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi
 }
 
 fn exit_text(status: std::process::ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt as _;
-    match (status.code(), status.signal()) {
-        (Some(c), _) => c.to_string(),
-        (None, Some(s)) => format!("signal {s}"),
-        (None, None) => status.to_string(),
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        match (status.code(), status.signal()) {
+            (Some(c), _) => c.to_string(),
+            (None, Some(s)) => format!("signal {s}"),
+            (None, None) => status.to_string(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        status
+            .code()
+            .map_or_else(|| status.to_string(), |c| c.to_string())
     }
 }
 
@@ -502,7 +511,12 @@ mod tests {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            assert!(crate::dist::layout().contains(&rel), "{rel}");
+            assert!(
+                crate::dist::layout()
+                    .iter()
+                    .any(|p| Path::new(p) == Path::new(&rel)),
+                "{rel}"
+            );
         }
     }
 
@@ -515,6 +529,7 @@ mod tests {
         assert_eq!(libs_private("Libs: -lx\n"), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn paths_resolve_and_show() {
         let d = tmp("paths");
@@ -550,9 +565,12 @@ mod tests {
                 "arm64",
                 "-mmacosx-version-min=26.6",
                 "-I",
-                "/t/dist/include",
+                &Path::new("/t/dist").join("include").to_string_lossy(),
                 &src.to_string_lossy(),
-                "/t/dist/lib/libreims_vgpu.a",
+                &Path::new("/t/dist")
+                    .join("lib")
+                    .join("libreims_vgpu.a")
+                    .to_string_lossy(),
                 "-framework",
                 "Metal",
                 "-lobjc",
@@ -669,7 +687,13 @@ mod tests {
         assert_eq!(
             summary(&d, &g, Path::new("/repo")),
             [
-                "smoke (arm64): the guest links target/dist/lib/libreims_vgpu.a statically",
+                &format!(
+                    "smoke (arm64): the guest links {} statically",
+                    Path::new("target/dist")
+                        .join("lib")
+                        .join("libreims_vgpu.a")
+                        .display()
+                ),
                 "  guest task 1: handshake accepted, exec ok, fill ok",
             ]
         );
@@ -795,6 +819,7 @@ mod tests {
 
     // -- the real host --------------------------------------------------------------------------
 
+    #[cfg(unix)]
     fn sh(script: &str, timeout: Duration) -> Ran {
         let d = tmp("exec");
         System
@@ -809,10 +834,29 @@ mod tests {
 
     #[test]
     fn exec_captures_output_and_exit() {
-        let r = sh("echo \"a: 1\"; echo err >&2; exit 3", TIMEOUT);
-        assert_eq!(r.stdout, "a: 1\n");
-        assert_eq!(r.stderr, "err\n");
-        assert_eq!(r.exit, "3");
+        #[cfg(unix)]
+        {
+            let r = sh("echo \"a: 1\"; echo err >&2; exit 3", TIMEOUT);
+            assert_eq!(r.stdout, "a: 1\n");
+            assert_eq!(r.stderr, "err\n");
+            assert_eq!(r.exit, "3");
+        }
+        #[cfg(windows)]
+        {
+            let d = tmp("exec-cmd");
+            let command = std::env::var_os("COMSPEC").unwrap();
+            let r = System
+                .exec(
+                    Path::new(&command),
+                    &s(&["/d", "/c", "echo a: 1& echo err 1>&2& exit /b 3"]),
+                    TIMEOUT,
+                    &d.join("x.txt"),
+                )
+                .unwrap();
+            assert_eq!(r.stdout.trim(), "a: 1");
+            assert_eq!(r.stderr.trim(), "err");
+            assert_eq!(r.exit, "3");
+        }
     }
 
     #[test]
@@ -835,9 +879,27 @@ mod tests {
 
     #[test]
     fn exec_reports_signals_and_timeouts() {
-        assert_eq!(sh("kill -9 $$", TIMEOUT).exit, "signal 9");
-        let r = sh("sleep 5", Duration::from_millis(200));
-        assert_eq!(r.exit, "timed out after 0 s");
+        #[cfg(unix)]
+        {
+            assert_eq!(sh("kill -9 $$", TIMEOUT).exit, "signal 9");
+            let r = sh("sleep 5", Duration::from_millis(200));
+            assert_eq!(r.exit, "timed out after 0 s");
+        }
+        #[cfg(windows)]
+        {
+            let d = tmp("exec-timeout");
+            let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let r = System
+                .exec(
+                    &shell,
+                    &s(&["-NoProfile", "-Command", "Start-Sleep -Seconds 5"]),
+                    Duration::from_millis(200),
+                    &d.join("x.txt"),
+                )
+                .unwrap();
+            assert_eq!(r.exit, "timed out after 0 s");
+        }
     }
 
     #[test]

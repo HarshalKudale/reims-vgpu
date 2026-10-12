@@ -13,19 +13,30 @@
 //! its loader, and fetching an image's drawable ahead where the driver needs it
 //! (`Drawables`: MoltenVK's, on macOS).
 
+#[cfg(any(target_os = "linux", windows))]
+mod backing;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "linux", windows))]
+mod standin;
 mod surface;
+#[cfg(windows)]
+mod windows;
 mod wsi;
 
 #[cfg(target_os = "linux")]
 use linux as host_os;
 #[cfg(target_os = "macos")]
 use macos as host_os;
+#[cfg(windows)]
+use windows as host_os;
 
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
 
 pub(crate) use host_os::{
@@ -35,6 +46,8 @@ pub use host_os::{
     GuestMemoryLease, OsClock, OsSurface, OsSurfaces, OsThreads, OsVm, default_gpu_core_count,
     default_registry_id, install_process_services, lease_guest_memory,
 };
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) use host_os::{OwnMemory, physical_memory};
 #[cfg(test)]
 pub(crate) use host_os::{PAGE, allocate_aliasable, mapped, writable};
 #[cfg(all(test, target_os = "macos"))]
@@ -57,9 +70,29 @@ pub struct GuestRamFile {
     /// The range's length in bytes.
     pub length: u64,
     /// The file.
+    #[cfg(unix)]
     pub fd: Arc<OwnedFd>,
+    /// The Windows pagefile-backed section.
+    #[cfg(windows)]
+    pub handle: Arc<OwnedHandle>,
     /// The file offset of the range's first byte.
     pub offset: u64,
+}
+
+#[cfg(unix)]
+type BackingHandle = OwnedFd;
+#[cfg(windows)]
+type BackingHandle = OwnedHandle;
+
+impl GuestRamFile {
+    #[cfg(unix)]
+    fn backing(&self) -> Arc<BackingHandle> {
+        Arc::clone(&self.fd)
+    }
+    #[cfg(windows)]
+    fn backing(&self) -> Arc<BackingHandle> {
+        Arc::clone(&self.handle)
+    }
 }
 
 #[cfg(test)]

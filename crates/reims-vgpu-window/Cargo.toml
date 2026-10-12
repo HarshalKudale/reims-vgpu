@@ -15,7 +15,7 @@ ash.workspace = true
 
 # The window on Linux (`sdl`): SDL3 for the window, its input and its Vulkan surface, and the
 # Vulkan crate's threads.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", windows))'.dependencies]
 reims-vgpu-vulkan.workspace = true
 sdl3-sys.workspace = true
 

@@ -49,7 +49,10 @@ impl ApiPlatform for VulkanPlatform {
             Some(GuestRamFile {
                 host: range.host_address.addr().to_u64(),
                 length: range.physical_length,
+                #[cfg(unix)]
                 fd: Arc::clone(&file.fd),
+                #[cfg(windows)]
+                handle: Arc::clone(&file.handle),
                 offset: file.offset,
             })
         });

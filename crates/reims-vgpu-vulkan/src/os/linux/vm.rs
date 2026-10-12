@@ -183,7 +183,7 @@ pub(super) fn file(
             length.to_usize(),
             prot,
             libc::MAP_SHARED | fixed,
-            backing.fd.as_raw_fd(),
+            backing.file.as_raw_fd(),
             offset,
         )
     };
@@ -233,7 +233,7 @@ impl OwnMemory {
         }
         budget::admit(1, "an IOSurface stand-in's memory");
         let backing = Backing {
-            fd: memfd(length),
+            file: memfd(length),
             offset: 0,
         };
         let first = file(None, length, &backing, libc::PROT_READ | libc::PROT_WRITE).ok()?;
@@ -364,7 +364,7 @@ fn put_back(at: u64, length: u64) {
 /// where the view cuts a run of its target in two.
 fn mappings_added(pieces: &[files::Piece]) -> u64 {
     let follows = |a: &files::Piece, b: &files::Piece| {
-        Arc::ptr_eq(&a.backing.fd, &b.backing.fd)
+        Arc::ptr_eq(&a.backing.file, &b.backing.file)
             && a.backing.offset + a.length == b.backing.offset
             && a.prot == b.prot
     };
@@ -766,7 +766,7 @@ pub(crate) mod tests {
             None,
             page(),
             &Backing {
-                fd: Arc::clone(&fd),
+                file: Arc::clone(&fd),
                 offset: 0,
             },
             libc::PROT_READ | libc::PROT_WRITE,
@@ -801,13 +801,13 @@ pub(crate) mod tests {
         let src = v.allocate_anywhere(2 * p).unwrap();
         let first = src.addr().to_u64();
         let ones = Backing {
-            fd: page_file(0x11, false),
+            file: page_file(0x11, false),
             offset: 0,
         };
         file(Some(first), p, &ones, rw).unwrap();
         files::record(first, p, ones, rw);
         let twos = Backing {
-            fd: page_file(0x22, true),
+            file: page_file(0x22, true),
             offset: 0,
         };
         file(Some(first + p), p, &twos, libc::PROT_READ).unwrap();
@@ -888,7 +888,7 @@ pub(crate) mod tests {
             None,
             page(),
             &Backing {
-                fd: Arc::clone(&fd),
+                file: Arc::clone(&fd),
                 offset: 0,
             },
             3,

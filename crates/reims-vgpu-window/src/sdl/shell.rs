@@ -188,7 +188,7 @@ pub(crate) fn close(id: u64) {
 
 /// Window `id`'s render thread let its surface go: SDL's window goes where the display has ended.
 #[cfg_attr(
-    not(target_os = "linux"),
+    not(any(target_os = "linux", windows)),
     expect(dead_code, reason = "only Linux's render thread holds SDL's window")
 )]
 pub(crate) fn released(id: u64) {

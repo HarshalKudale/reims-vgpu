@@ -5,11 +5,11 @@
 //! the loader). No Objective-C runs here: core pushes no autorelease pool where none is
 //! installed.
 
-mod budget;
+pub(super) mod budget;
 mod clock;
-mod files;
+use super::backing as files;
 mod import;
-mod surface;
+use super::standin as surface;
 mod threads;
 mod vm;
 
@@ -20,9 +20,10 @@ use metal2vulkan_runtime as rt;
 
 pub use clock::LinuxClock;
 pub use files::{GuestMemoryLease, lease_guest_memory};
-pub use surface::{LinuxSurface, LinuxSurfaces};
+pub use surface::{StandInSurface as LinuxSurface, StandInSurfaces as LinuxSurfaces};
 pub use threads::LinuxThreads;
 pub use vm::LinuxVm;
+pub(crate) use vm::OwnMemory;
 
 pub(crate) use import::{TWINS_READ_ONLY, allocate_zeros, import_view, shown_at};
 pub(crate) use surface::{plane_at, plane_shape, recorded_mut, ycbcr_matrix};
@@ -81,6 +82,20 @@ pub type OsVm = LinuxVm;
 pub type OsSurface = LinuxSurface;
 /// IOSurface creation: the stand-in's.
 pub type OsSurfaces = LinuxSurfaces;
+
+/// The kernel's count of physical memory, as IOSurface's stand-in bounds allocations.
+pub(crate) fn physical_memory() -> u64 {
+    // SAFETY: sysconf reads system constants.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    u64::try_from(pages)
+        .unwrap_or(0)
+        .saturating_mul(u64::try_from(page).unwrap_or(0))
+}
 
 /// Installs what the process's platform needs before it runs, once: the soft limit of open files
 /// raised to the hard limit, as each IOSurface stand-in of its own memory holds a file open

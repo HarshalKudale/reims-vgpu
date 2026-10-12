@@ -29,8 +29,10 @@
 // limit of 128 (E0275), as the C crate's does.
 #![recursion_limit = "256"]
 
-#[cfg(all(target_os = "linux", not(feature = "vulkan")))]
-compile_error!("on Linux the library is the Vulkan platform's: build it with the `vulkan` feature");
+#[cfg(all(any(target_os = "linux", windows), not(feature = "vulkan")))]
+compile_error!(
+    "on Linux and Windows the library is the Vulkan platform's: build it with the `vulkan` feature"
+);
 
 mod device;
 mod display;
@@ -68,7 +70,7 @@ pub use reims_vgpu_vulkan::VulkanPlatform;
 #[cfg(target_os = "macos")]
 pub type DefaultPlatform = MetalPlatform;
 /// The platform every handle is made on by default: `VulkanPlatform` on Linux.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub type DefaultPlatform = VulkanPlatform;
 pub use reims_vgpu_window::{
     BUTTON_EXTRA, BUTTON_LEFT, BUTTON_MIDDLE, BUTTON_RIGHT, BUTTON_SIDE, CloseFn, KeyFn,

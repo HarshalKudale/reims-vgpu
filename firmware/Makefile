@@ -13,6 +13,7 @@
 CC    = clang
 LD    = lld-link
 ROMLD = ld.lld
+OBJCOPY = llvm-objcopy
 
 BUILD = build
 NAME  = ReimsVgpu
@@ -48,7 +49,11 @@ rom: $(BUILD)/$(NAME).rom
 $(BUILD)/$(NAME).rom: src/OptionRom.S src/ReimsVgpu.h $(BUILD)/$(NAME).efi
 	$(CC) --target=x86_64-unknown-none-elf -DEFI_IMAGE='"$(BUILD)/$(NAME).efi"' \
 		-c $< -o $(BUILD)/obj/OptionRom.o
+ifeq ($(OS),Windows_NT)
+	$(OBJCOPY) -O binary $(BUILD)/obj/OptionRom.o $@
+else
 	$(ROMLD) --oformat binary -o $@ $(BUILD)/obj/OptionRom.o
+endif
 
 $(BUILD)/$(NAME).efi: $(OBJECTS)
 	$(LD) $(LDFLAGS) /out:$@ $^

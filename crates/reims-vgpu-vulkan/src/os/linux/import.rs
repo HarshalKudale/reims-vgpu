@@ -50,7 +50,7 @@ static ZERO_FILES: Mutex<Vec<Arc<OwnedFd>>> = Mutex::new(Vec::new());
 pub(crate) fn allocate_zeros(len: u64) -> Result<HostAddr, KernReturn> {
     let at = vm::allocate_aliasable(len)?;
     if let Some(piece) = files::pieces(at.addr().to_u64(), 1).and_then(|p| p.into_iter().next()) {
-        ZERO_FILES.lock().push(piece.backing.fd);
+        ZERO_FILES.lock().push(piece.backing.file);
     }
     Ok(at)
 }
@@ -178,7 +178,7 @@ fn twin(first: u64, length: u64, pieces: &[files::Piece]) -> Option<Twin> {
     let rw = libc::PROT_READ | libc::PROT_WRITE;
     for piece in pieces {
         let at = Some(base + piece.at);
-        if zeros(&piece.backing.fd) {
+        if zeros(&piece.backing.file) {
             // The reservation is private zeros already: mapped again, so no earlier bytes stay.
             vm::anonymous(at, piece.length, "an import's twin").ok()?;
         } else {
@@ -195,14 +195,14 @@ fn twin(first: u64, length: u64, pieces: &[files::Piece]) -> Option<Twin> {
 /// pieces of zeros next to each other (private zeros, as the twin's reservation is) or each piece
 /// following the one before in the same file (all read and write in the twin).
 fn twin_mappings(pieces: &[files::Piece]) -> u64 {
-    let zeros: Vec<bool> = pieces.iter().map(|p| zeros(&p.backing.fd)).collect();
+    let zeros: Vec<bool> = pieces.iter().map(|p| zeros(&p.backing.file)).collect();
     let apart = (1..pieces.len())
         .filter(|&i| {
             let (a, b) = (&pieces[i - 1], &pieces[i]);
             let together = if zeros[i - 1] || zeros[i] {
                 zeros[i - 1] && zeros[i]
             } else {
-                Arc::ptr_eq(&a.backing.fd, &b.backing.fd)
+                Arc::ptr_eq(&a.backing.file, &b.backing.file)
                     && a.backing.offset + a.length == b.backing.offset
             };
             !together
@@ -309,13 +309,13 @@ mod tests {
         let zero_at = allocate_zeros(PAGE).unwrap();
         let z = files::pieces(zero_at.addr().to_u64(), 1).unwrap()[0]
             .backing
-            .fd
+            .file
             .clone();
         let piece = |at: u64, fd: &Arc<OwnedFd>, offset: u64| files::Piece {
             at: at * PAGE,
             length: PAGE,
             backing: files::Backing {
-                fd: Arc::clone(fd),
+                file: Arc::clone(fd),
                 offset: offset * PAGE,
             },
             prot: libc::PROT_READ,
@@ -355,7 +355,7 @@ mod tests {
         let vm = LinuxVm::new();
         let at = allocate_zeros(PAGE).unwrap();
         let first = at.addr().to_u64();
-        assert!(zeros(&files::pieces(first, 1).unwrap()[0].backing.fd));
+        assert!(zeros(&files::pieces(first, 1).unwrap()[0].backing.file));
         assert!(vm.protect_max(at, PAGE, VmProt::READ).is_ok());
         let p = address(first).unwrap();
         let view = import_view(p, PAGE);

@@ -31,10 +31,14 @@ use crate::util::{Res, repo_root};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 #[cfg(target_os = "linux")]
 use linux as native;
 #[cfg(target_os = "macos")]
 use macos as native;
+#[cfg(windows)]
+use windows as native;
 
 /// The library's name: `lib/libreims_vgpu.{a,dylib,so}`, linked with `-lreims_vgpu`.
 pub const LIB: &str = "reims_vgpu";
@@ -148,6 +152,7 @@ pub fn c_api_args(o: &Options) -> Vec<String> {
 
 /// The `make` arguments that build the option ROM from `firmware`, the driver's directory, into
 /// `build`.
+#[cfg(any(unix, test))]
 pub fn firmware_args(firmware: &Path, build: &Path) -> Vec<String> {
     let mut args = strs_with(&["-C"], firmware);
     args.push(format!("BUILD={}", build.display()));
@@ -181,7 +186,11 @@ pub fn pc_file(version: &str, libs_private: &[String]) -> String {
 pub fn layout() -> [String; 5] {
     [
         format!("lib/lib{LIB}.a"),
-        format!("lib/lib{LIB}.{}", native::SHARED_LIBRARY_EXTENSION),
+        if cfg!(windows) {
+            format!("lib/{LIB}_c.dll")
+        } else {
+            format!("lib/lib{LIB}.{}", native::SHARED_LIBRARY_EXTENSION)
+        },
         format!("lib/pkgconfig/{PACKAGE}.pc"),
         format!("include/{HEADER}"),
         format!("share/{PACKAGE}/{ROM}"),
@@ -244,6 +253,7 @@ fn strs(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| (*s).to_owned()).collect()
 }
 
+#[cfg(any(unix, test))]
 fn strs_with(args: &[&str], p: &Path) -> Vec<String> {
     let mut v = strs(args);
     v.push(p.to_string_lossy().into_owned());
@@ -264,14 +274,19 @@ fn write(p: &Path, content: &str) -> Res<()> {
 
 /// Copies a built file to `to` with `mode`, replacing what is there.
 fn install(from: &Path, to: &Path, mode: u32) -> Res<()> {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     mkdir_parent(to)?;
     if std::fs::symlink_metadata(to).is_ok() {
         std::fs::remove_file(to).map_err(|e| format!("{}: {e}", to.display()))?;
     }
     std::fs::copy(from, to).map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+    #[cfg(unix)]
     std::fs::set_permissions(to, std::fs::Permissions::from_mode(mode))
-        .map_err(|e| format!("{}: {e}", to.display()))
+        .map_err(|e| format!("{}: {e}", to.display()))?;
+    #[cfg(windows)]
+    let _ = mode;
+    Ok(())
 }
 
 /// What the OSes' tests share.
@@ -280,10 +295,13 @@ mod testing {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(unix)]
     use crate::tools::Tools;
+    #[cfg(unix)]
     use crate::util::Res;
 
     /// Records every call; `output` answers with `answer`, and `run` of `fail` fails.
+    #[cfg(unix)]
     #[derive(Default)]
     pub struct Log {
         pub calls: Vec<(String, Vec<String>)>,
@@ -291,6 +309,7 @@ mod testing {
         pub fail: Option<&'static str>,
     }
 
+    #[cfg(unix)]
     impl Tools for Log {
         fn run(&mut self, program: &str, args: &[String]) -> Res<()> {
             self.calls.push((program.to_owned(), args.to_vec()));
@@ -305,6 +324,7 @@ mod testing {
         }
     }
 
+    #[cfg(unix)]
     impl Log {
         /// Each call as one line: the program, then its arguments.
         pub fn lines(&self) -> Vec<String> {
@@ -332,6 +352,7 @@ mod testing {
         std::fs::write(p, content).unwrap();
     }
 
+    #[cfg(unix)]
     pub fn mode(p: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
@@ -434,6 +455,7 @@ mod tests {
         assert_eq!(read(&written[0]), "either, at your option");
         assert_eq!(read(&written[1]), "a");
         assert_eq!(read(&written[2]), "b");
+        #[cfg(unix)]
         for p in &written {
             assert_eq!(testing::mode(&out.join(p)), 0o644, "{p}");
         }

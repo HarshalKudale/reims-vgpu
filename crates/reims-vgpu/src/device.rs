@@ -19,7 +19,10 @@
 //! core handle.
 
 use std::any::Any;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
 
 use reims_vgpu_core::device::Device as CoreDevice;
@@ -57,7 +60,11 @@ pub struct MemoryMap {
 #[derive(Clone, Debug)]
 pub struct MemoryFile {
     /// The file, held open while any map or device holds it.
+    #[cfg(unix)]
     pub fd: Arc<OwnedFd>,
+    /// The Windows section, held open while any map or device holds it.
+    #[cfg(windows)]
+    pub handle: Arc<OwnedHandle>,
     /// The file offset of the range's first byte, a multiple of the host's page size.
     pub offset: u64,
 }

@@ -164,7 +164,7 @@ fn cmd_check(args: &[String]) -> Res<bool> {
     ok &= cmd_testkit(&[])?;
     ok &= header::cmd_header(&["--check".to_owned()])?;
     if !flag(args, "--no-cargo") {
-        let features = if cfg!(target_os = "linux") {
+        let features = if cfg!(any(target_os = "linux", windows)) {
             LINUX_FEATURES
         } else {
             TESTED_FEATURES

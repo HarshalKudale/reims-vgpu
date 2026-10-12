@@ -1,5 +1,15 @@
 # reims-vgpu-window features
 
+## On Windows
+
+- The SDL3 UI thread creates a Win32 window and Vulkan surface; the render
+  thread uses the native Vulkan swapchain. `manual`
+- Input uses SDL scancodes, focus loss releases held keys and buttons, and
+  window destruction waits for its render thread to release the surface.
+  The SDL input and render unit tests also compile on Windows. `manual`
+- Native Windows guest checks are required; a Linux or macOS walk does not
+  establish their result.
+
 What someone at the host sees and does with a guest display's window. Every
 entry was put in on purpose. Removing or changing one is a regression unless
 it is done deliberately, in its own commit, with this file updated and the
