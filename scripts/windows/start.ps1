@@ -134,6 +134,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
     $rom = ConvertTo-ReimsQemuPath $Config.rom
     $serial = ConvertTo-ReimsQemuPath (Join-Path $RunDirectory 'serial.log')
     $qemuArguments = @(
+        '-L', (ConvertTo-ReimsQemuPath (Join-Path $ProjectRoot 'vendor/qemu/pc-bios')),
         '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx' }),
         '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',

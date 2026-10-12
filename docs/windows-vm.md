@@ -141,6 +141,8 @@ kernel diagnostics are enabled without relaxing SIP or AMFI. After boot,
 recovery reports SIP enabled; OpenCore's temporary booter CSR bit for slide
 selection is restored before XNU receives it.
 
+Its `-L` path points to the pinned QEMU source's `pc-bios`, so relocating the
+executable does not lose its network/virtual APIC option ROMs.
 The command retains the existing q35 PCI layout: AHCI at slot 2, network at
 3, `apple-gfx-pci` at 4 and xHCI at 5. It uses the real `displays`,
 `resolution` and `romfile` properties. Keyboard/tablet and a USB audio output

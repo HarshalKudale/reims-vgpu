@@ -18,7 +18,7 @@
 | Native NVIDIA authored AIR pipeline | 1 passed |
 | Native NVIDIA buffer copy/fill | 1 passed |
 | metal2vulkan focused checks | 10 host-memory CPU, 1 CRT-exit, 1 native GPU passed |
-| Firmware/VM/QMP/snapshot self-checks | 54 assertions passed, including the CLI and empty array results |
+| Firmware/VM/QMP/snapshot self-checks | 55 assertions passed, including ROM lookup, CLI and empty array results |
 | PCI/RAM realization, reset, QMP quit and native Win32 window | Passed in paused TCG diagnostic |
 | Missing WHPX refusal | Passed; no fallback or guest boot |
 | Real WHPX firmware boot and CLI status/key/mouse/screen commands | Passed; booter reaches handoff to XNU |

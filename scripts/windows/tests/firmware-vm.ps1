@@ -66,6 +66,7 @@ try {
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx') 'WHPX is the sole default accelerator'
     Assert-Condition ('tcg' -notin $command) 'No automatic TCG fallback'
+    Assert-Condition ($command[$command.IndexOf('-L') + 1] -eq (ConvertTo-ReimsQemuPath (Join-Path $testRoot 'vendor/qemu/pc-bios'))) 'ROM lookup is independent of the QEMU build directory'
     Assert-Condition (($command | Where-Object { $_ -like 'id=installer,*' }) -match 'snapshot=on') 'APM original is protected by an overlay'
     Assert-Condition (($command | Where-Object { $_ -like 'id=opencore,*' }) -match 'snapshot=on') 'OpenCore template is protected by an overlay'
     Assert-Condition (($command -join ' ') -match 'apple-gfx-pci.*resolution=1920x1080') 'Actual GPU ABI and 1080p'
