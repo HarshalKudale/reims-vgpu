@@ -76,7 +76,8 @@ OpenCore is pinned to the official [OpenCorePkg 1.0.8 release](https://github.co
 digest. Downloads live in `.work/downloads/`. The script verifies that
 digest, derives its plist from that release's Sample.plist, and runs the
 same release's Windows `ocvalidate.exe`. Once cached, it needs no network.
-It uses `OpenRuntime.efi` and the open source `OpenHfsPlus.efi`, with no
+It uses `OpenRuntime.efi`, `OpenPartitionDxe.efi` for Apple partition maps,
+and the open source `OpenHfsPlus.efi`, with no
 Apple firmware or kext binaries added. The built-in picker, iMac20,1 model,
 j185 Apple Secure Boot model and signed DMG loading are configured; CSR is
 zero, and no AMFI disabling boot arguments are set. Sample serial/MLB values
@@ -124,7 +125,21 @@ accept agreements, enter passwords, alter guest security, or automate an
 installation. OpenCore validation is a schema check, not a boot check. The
 Haswell CPU model and its required AVX/AVX2/XSAVE flags use `enforce`, so an
 unsupported accelerator/CPU combination fails rather than hiding missing
-features. Windows WHPX compatibility still needs a real boot.
+features. Native WHPX recovery boot is recorded below; the installed system
+and its GPU workload still need verification.
+
+WHPX on the measured Windows host does not expose CPUID leaf 6's ARAT bit.
+The default Haswell model masks that bit with `-arat`, retaining `enforce`
+for its other required features. It also selects `stepping=3`: QEMU's
+default Haswell stepping 1 reaches XNU's rejection of pre-C0 processors.
+An existing VM's `vm/state/config.json` retains its settings; add
+`,stepping=3` after `Haswell-noTSX` and `,-arat` before `,enforce` in its CPU
+string.
+
+The picker waits for an explicit selection during installation. Serial
+kernel diagnostics are enabled without relaxing SIP or AMFI. After boot,
+recovery reports SIP enabled; OpenCore's temporary booter CSR bit for slide
+selection is restored before XNU receives it.
 
 The command retains the existing q35 PCI layout: AHCI at slot 2, network at
 3, `apple-gfx-pci` at 4 and xHCI at 5. It uses the real `displays`,
@@ -141,9 +156,47 @@ QMP is unauthenticated, so local processes with access to its port can
 control the guest. The management scripts check the recorded PID's start
 time and executable before connecting or stopping it, refusing PID reuse.
 
-`-DiagnosticTcg` is an explicit **paused, headless device diagnostic**. It
+## Operate the VM from the CLI
+
+`qmp.ps1` uses the same recorded-process and localhost checks. Pass a QMP
+command and a PowerShell hashtable; it returns the command's result as JSON.
+No desktop automation or foreground window is needed:
+
+```powershell
+./scripts/windows/qmp.ps1 -Command query-status
+./scripts/windows/qmp.ps1 -Command query-block
+./scripts/windows/qmp.ps1 -Command stop            # pause CPUs
+./scripts/windows/qmp.ps1 -Command cont            # resume CPUs
+./scripts/windows/qmp.ps1 -Command send-key -Arguments @{ keys = @(@{ type = 'qcode'; data = 'ret' }); 'hold-time' = 100 }
+./scripts/windows/qmp.ps1 -Command screendump -Arguments @{ filename = 'D:/git/reims/vm/logs/guest.ppm' }
+```
+
+For mouse input, `input-send-event` accepts absolute coordinates from 0 to
+32767 on each axis and separate button press/release events. This moves to
+the centre and clicks the left button:
+
+```powershell
+./scripts/windows/qmp.ps1 -Command input-send-event -Arguments @{ events = @(
+    @{ type = 'abs'; data = @{ axis = 'x'; value = 16384 } }
+    @{ type = 'abs'; data = @{ axis = 'y'; value = 16384 } }
+    @{ type = 'btn'; data = @{ button = 'left'; down = $true } }
+) }
+Start-Sleep -Milliseconds 150
+./scripts/windows/qmp.ps1 -Command input-send-event -Arguments @{ events = @(
+    @{ type = 'btn'; data = @{ button = 'left'; down = $false } }
+) }
+```
+
+Inspect a fresh guest screendump before selecting keys or coordinates.
+Screen capture defaults to PPM, so it also works without QEMU's optional
+libpng support. Use `stop.ps1` for a normal shutdown; `system_reset` is a
+hard reset and can discard unsaved guest work. Handle agreements and account
+credentials personally.
+
+`-DiagnosticTcg` is an explicit **paused device diagnostic**. It
 always includes `-S`; it is not a boot or performance result. The benchmark
-refuses it. Nothing switches a normal start to this mode automatically.
+refuses it. Add `-Headless` to suppress its window. Nothing switches a normal
+start to this mode automatically.
 
 ## Offline snapshots, logs and measurements
 
@@ -210,4 +263,11 @@ hashes, commands and results remain in the ignored `vm/state/` and
 `.work/diagnostics/firmware-vm/` records. Windows Hypervisor Platform was
 disabled (InstallState 2) and HypervisorPresent was false. No guest boot,
 installation, desktop correctness or Windows guest GPU performance has
-been demonstrated by this preparation.
+been demonstrated by that preparation. After the host restart, WHPX reports
+a running hypervisor. Masking ARAT allows the enforced Haswell model to
+start; adding OpenPartitionDxe makes the APM/HFS+ installer visible. CLI
+input starts the Tahoe booter, which verifies the j185 kernel collection
+and boots the recovery UI. The core/thread count MSR must reflect eight
+CPUs, rather than leaving XNU's one-CPU fallback. The new target was formatted
+as GPT/APFS and recovery reports 26.4/25E246 with SIP enabled. Installation,
+guest Metal and the desktop remain unverified.

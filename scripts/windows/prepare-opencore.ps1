@@ -33,7 +33,7 @@ $python = Get-ReimsTool 'python.exe'
 $destination = Join-Path $ProjectRoot "vm/firmware/opencore-$Version"
 $efiRoot = Join-Path $destination 'root'
 New-Item -ItemType Directory -Force -Path (Join-Path $efiRoot 'EFI/BOOT'), (Join-Path $efiRoot 'EFI/OC/Drivers') | Out-Null
-foreach ($relative in @('BOOT/BOOTx64.efi', 'OC/OpenCore.efi', 'OC/Drivers/OpenRuntime.efi', 'OC/Drivers/OpenHfsPlus.efi')) {
+foreach ($relative in @('BOOT/BOOTx64.efi', 'OC/OpenCore.efi', 'OC/Drivers/OpenRuntime.efi', 'OC/Drivers/OpenPartitionDxe.efi', 'OC/Drivers/OpenHfsPlus.efi')) {
     Copy-Item -LiteralPath (Join-Path $package "X64/EFI/$relative") -Destination (Join-Path $efiRoot "EFI/$relative") -Force
 }
 $plist = Join-Path $efiRoot 'EFI/OC/config.plist'
@@ -51,12 +51,12 @@ c['DeviceProperties']['Delete'] = {}
 c['Booter']['Quirks'].update(EnableWriteUnprotector=False, RebuildAppleMemoryMap=True, SyncRuntimePermissions=True)
 c['Kernel']['Emulate']['DummyPowerManagement'] = True
 c['Kernel']['Quirks'].update(AppleXcpmExtraMsrs=True, DisableLinkeditJettison=False)
-c['Misc']['Boot'].update(HideAuxiliary=False, Timeout=10)
-c['Misc']['Debug'].update(AppleDebug=True, ApplePanic=True, Target=11)
+c['Misc']['Boot'].update(HideAuxiliary=False, Timeout=0)
+c['Misc']['Debug'].update(AppleDebug=True, ApplePanic=True, DisplayLevel=0x80000042, Target=75)
 c['Misc']['Serial']['Init'] = True
 c['Misc']['Security'].update(ScanPolicy=0, SecureBootModel='j185', DmgLoading='Signed', Vault='Optional')
 apple = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
-c['NVRAM']['Add'][apple] = {'boot-args': '-v keepsyms=1', 'csr-active-config': bytes(4),
+c['NVRAM']['Add'][apple] = {'boot-args': '-v keepsyms=1 serial=3 debug=0x108', 'csr-active-config': bytes(4),
                           'prev-lang:kbd': b'en:252', 'run-efi-updater': 'No'}
 c['NVRAM']['Delete'][apple] = ['boot-args']
 generic = c['PlatformInfo']['Generic']
@@ -65,7 +65,9 @@ generic.update(SystemProductName='iMac20,1', SystemUUID=str(uuid.uuid4()).upper(
 driver = next(x for x in c['UEFI']['Drivers'] if x['Path'] == 'OpenRuntime.efi')
 hfs = copy.deepcopy(driver)
 hfs['Path'], hfs['Comment'] = 'OpenHfsPlus.efi', 'OpenCore HFS+ driver'
-c['UEFI']['Drivers'] = [driver, hfs]
+partition = copy.deepcopy(driver)
+partition['Path'], partition['Comment'] = 'OpenPartitionDxe.efi', 'Apple partition map support'
+c['UEFI']['Drivers'] = [driver, partition, hfs]
 c['UEFI']['Output']['Resolution'] = '1920x1080'
 target.write_bytes(plistlib.dumps(c, sort_keys=False))
 '@

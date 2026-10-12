@@ -1419,3 +1419,27 @@ outside that range, which on one boot of 15.6.1 ran from 0x70a04000 to
 - The `manual` entries of `crates/reims-vgpu-window/features.md` that
   "Window mode" does not record as measured, the guest's input, capture
   and the system's hot keys among them.
+
+## Native Windows WHPX boot
+
+Measured on Windows 11 10.0.26300 with an i9-13900KS on 2026-10-12:
+HypervisorPlatform must be enabled and the host restarted. The WHPX API then
+reports a present hypervisor. With `Haswell-noTSX`, mask ARAT, which this
+WHPX host does not expose, and select stepping 3. That model's default
+stepping 1 reaches XNU's pre-C0 rejection before its console initializes;
+the panic text was found on CPU 0's stack through the QMP monitor. The
+[public XNU check](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/i386/machine_check.c)
+requires Haswell stepping 3 or later.
+
+An APM/HFS+ installer needs OpenPartitionDxe as well as OpenHfsPlus. With
+those drivers, OpenCore detects the supplied Tahoe 26.4 installer and QMP
+key input starts its signed booter. It verifies the j185 kernel collection
+and hands off to XNU. No host screen capture is used: QMP `screendump` reads
+the guest display, and QMP input commands reach its keyboard/tablet.
+
+The first kernel run with a supported stepping rejected the mismatch
+between eight ACPI processors and the default one-core fallback for an
+unhandled MSR_CORE_THREAD_COUNT read. WHPX must return the same configured
+topology helper that TCG, KVM and HVF already use. Keep native build, paused
+realization and cold guest boot evidence separate from installer/desktop
+and GPU workload validation. CLI commands are in [windows-vm.md](windows-vm.md).

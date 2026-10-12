@@ -1,8 +1,10 @@
 # Known issues
 
-- Windows Hypervisor Platform is disabled. WHvGetCapability succeeds but
-  reports no hypervisor; BIOS virtualization is enabled. Administrator
-  enablement and a Windows restart are required for actual WHPX boot.
+- WHPX boots the Tahoe 26.4 recovery UI with eight CPUs after correcting
+  Haswell stepping and the core/thread count MSR. GPT/APFS preparation is
+  complete; license acceptance and installation remain pending.
+- Recovery ignored QMP system_powerdown within 15 seconds. Its Terminal
+  shutdown command exited cleanly; installed-system shutdown is unverified.
 - Tahoe installation, installer agreement, account setup, desktop/reboot,
   Finder/Dock/Safari, Liquid Glass and sustained FPS have not been exercised.
 - One legacy core test, tasks::shared::tests::data_from_virtual_offset::

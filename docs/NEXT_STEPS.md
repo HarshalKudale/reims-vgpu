@@ -1,13 +1,16 @@
-# Continue after the host prerequisite
+# Continue from Tahoe recovery
 
-1. Save other work. In an administrator PowerShell run
-   scripts/windows/enable-whpx.ps1. It enables HypervisorPlatform without
-   restarting. Restart Windows yourself when ready.
-2. In the project, run scripts/windows/doctor.ps1 -RequireWhpx, then
-   scripts/windows/start.ps1. The default path uses WHPX, 8 vCPUs, 8 GiB,
-   the validated OpenCore/OVMF/ROM, native Vulkan and the retained installer.
-3. Follow installer boot logs and diagnose actual WHPX CPU/device behavior.
-   The user must handle the installer agreement and account credentials.
+1. WHPX is enabled and the host has restarted. Run start.ps1 to boot and
+   qmp.ps1 for JSON commands, key/mouse input and guest screendumps. The VM
+   uses WHPX, 8 vCPUs, 8 GiB, the validated OpenCore/OVMF/ROM, native Vulkan
+   and the retained installer. Its enforced Haswell CPU masks ARAT.
+2. OpenPartitionDxe detects the APM/HFS+ installer. Choose its observed
+   OpenCore menu entry with QMP send-key. The picker waits for selection.
+   The core/thread count MSR matches eight CPUs; recovery reaches its GUI.
+3. The 128 GiB target is GPT/APFS with a Reims volume. Launch the installer
+   and install there after the user accepts the agreement. Use the account
+   and region supplied by the owner; keep passwords out of source files,
+   command lines and logs.
    Preserve SIP/AMFI settings and use the overlay chain.
 4. Validate the installed Tahoe desktop and restart, AppleParavirtGPU/Metal,
    Finder/Dock/Safari, WindowServer/kernel logs and Liquid Glass screenshots.

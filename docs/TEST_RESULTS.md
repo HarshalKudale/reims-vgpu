@@ -18,10 +18,15 @@
 | Native NVIDIA authored AIR pipeline | 1 passed |
 | Native NVIDIA buffer copy/fill | 1 passed |
 | metal2vulkan focused checks | 10 host-memory CPU, 1 CRT-exit, 1 native GPU passed |
-| Firmware/VM/QMP/snapshot self-checks | 48 assertions passed |
+| Firmware/VM/QMP/snapshot self-checks | 54 assertions passed, including the CLI and empty array results |
 | PCI/RAM realization, reset, QMP quit and native Win32 window | Passed in paused TCG diagnostic |
 | Missing WHPX refusal | Passed; no fallback or guest boot |
-| WHPX/Tahoe/Liquid Glass/workload FPS | Not run; prerequisite blocked |
+| Real WHPX firmware boot and CLI status/key/mouse/screen commands | Passed; booter reaches handoff to XNU |
+| WHPX core/thread count MSR | Six package cases passed; original code fails the test |
+| Tahoe 26.4 recovery UI, sw_vers, SIP | Passed on eight CPUs; 25E246 and SIP enabled |
+| Target GPT/APFS format and offline snapshot | Passed on the new 128 GiB overlay |
+| Recovery shutdown | Guest Terminal command passed; QMP powerdown timed out |
+| Installed Tahoe/guest Metal/Liquid Glass/workload FPS | Pending installation |
 
 NVIDIA evidence is for RTX 4070 SUPER (10de:2783), driver 616.56. Import
 alignment is 4096 bytes. Private and shared-section memory, including two

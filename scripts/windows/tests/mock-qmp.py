@@ -30,6 +30,8 @@ class QmpHandler(socketserver.StreamRequestHandler):
                 result = {'running': True, 'status': 'running', 'singlestep': False}
             elif command == 'query-block':
                 result = []
+            elif command == 'fixture-echo':
+                result = request['arguments']
             elif command == 'screendump':
                 pathlib.Path(request['arguments']['filename']).write_bytes(b'P6\n1 1\n255\n\x01\x02\x03')
             self.send({'return': result, 'id': request['id']})

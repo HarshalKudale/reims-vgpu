@@ -23,7 +23,7 @@ function Assert-ReimsArtifactPath([string]$Path) {
 function Write-ReimsJson([string]$Path, $Value) {
     $Path = Assert-ReimsArtifactPath $Path
     New-Item -ItemType Directory -Force -Path (Split-Path $Path) | Out-Null
-    $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath "$Path.new" -Encoding utf8NoBOM
+    ConvertTo-Json -InputObject $Value -Depth 20 | Set-Content -LiteralPath "$Path.new" -Encoding utf8NoBOM
     Move-Item -LiteralPath "$Path.new" -Destination $Path -Force
 }
 
@@ -103,7 +103,7 @@ function Invoke-ReimsQmp($Runtime, [string]$Command, [hashtable]$Arguments = @{}
             } while (!$response.PSObject.Properties['id'] -or $response.id -ne $request.id)
             if ($response.PSObject.Properties['error']) { throw "QMP $($request.execute): $($response.error.desc)" }
         }
-        return $response.return
+        return ,$response.return
     } finally { $client.Dispose() }
 }
 

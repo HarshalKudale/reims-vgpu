@@ -153,6 +153,14 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     Write-ReimsJson (Join-Path $testRoot 'vm/state/runtime.json') $runtime
     Assert-Condition (Invoke-ReimsQmp $runtime 'query-status').running 'QMP skips events and unrelated response IDs'
     Assert-Throws { Invoke-ReimsQmp $runtime 'fixture-error' } 'fixture failure'
+    $cliStatus = & (Join-Path $testScripts 'qmp.ps1') -Command query-status | ConvertFrom-Json
+    Assert-Condition $cliStatus.running 'QMP CLI returns structured status'
+    $cliBlocks = & (Join-Path $testScripts 'qmp.ps1') -Command query-block
+    Assert-Condition ($cliBlocks.Trim() -eq '[]') 'QMP CLI preserves an empty result array'
+    $inputArguments = @{ events = @(@{ type = 'key'; data = @{ down = $false; key = @{ type = 'qcode'; data = 'ret' } } }) }
+    $echo = & (Join-Path $testScripts 'qmp.ps1') -Command fixture-echo -Arguments $inputArguments | ConvertFrom-Json
+    Assert-Condition ($echo.events[0].data.down -eq $false -and $echo.events[0].data.key.data -eq 'ret') 'QMP CLI preserves nested input events and false values'
+    Assert-Throws { & (Join-Path $testScripts 'qmp.ps1') -Command fixture-error } 'fixture failure'
     Assert-Throws { Assert-ReimsVmStopped } 'Stop this VM'
     $wrong = $runtime.PSObject.Copy()
     $wrong.start_ticks++
@@ -160,6 +168,7 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     & (Join-Path $testScripts 'collect-logs.ps1') -Screenshot | Out-Null
     $report = Get-ChildItem -LiteralPath (Join-Path $testRoot '.work/diagnostics') -Directory -Filter 'vm-*' | Select-Object -Last 1
     Assert-Condition (Test-Path -LiteralPath (Join-Path $report.FullName 'guest.ppm')) 'Collect uses guest QMP screendump'
+    Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $report.FullName 'qmp-block.json')).Trim() -eq '[]') 'Collected QMP JSON preserves empty block arrays'
     Assert-Condition ((Get-Content -Raw -LiteralPath (Join-Path $report.FullName 'failures.txt')) -match 'fixture only') 'Fatal log lines are retained'
     & (Join-Path $testScripts 'benchmark.ps1') -Seconds 1 | Out-Null
     $benchmark = Get-ChildItem -LiteralPath (Join-Path $testRoot '.work/diagnostics') -Directory -Filter 'benchmark-*' | Select-Object -Last 1
@@ -190,6 +199,9 @@ apple = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 assert c['NVRAM']['Add'][apple]['csr-active-config'] == bytes(4)
 assert 'amfi' not in c['NVRAM']['Add'][apple]['boot-args'].lower()
 assert c['Misc']['Security']['DmgLoading'] == 'Signed'
+drivers = {d['Path']: d['Enabled'] for d in c['UEFI']['Drivers']}
+assert drivers.get('OpenPartitionDxe.efi'), 'APM installers require the partition driver'
+assert drivers.get('OpenHfsPlus.efi'), 'HFS+ installers require the filesystem driver'
 pathlib.Path(target).write_bytes(raw)
 '@
         $imageCheck | & $python - $opencore.image $opencore.config $sevenZip $imageConfig

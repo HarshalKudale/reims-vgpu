@@ -1,12 +1,15 @@
 # Windows native Tahoe implementation
 
-The setup is ready for the Windows Hypervisor Platform prerequisite. This is
-not a completed Tahoe installation or a Liquid Glass correctness claim.
+Windows Hypervisor Platform is enabled after the host restart. A real WHPX
+boot reaches the Tahoe 26.4 recovery UI. The new 128 GiB target is formatted
+as GPT/APFS, and recovery reports SIP enabled. This is not a completed
+Tahoe installation or a
+Liquid Glass correctness claim.
 
 ## Sources and toolchain
 
 - Reims base: steelbrain/reims-vgpu `9b2c5452de94a474cba28d80d7f99d9d7b19ffe3`.
-- QEMU Windows branch: tqmane/qemu-reims-vgpu `22229b3d96b61578ee252abaf71c1912672fce5e`,
+- QEMU Windows branch: tqmane/qemu-reims-vgpu `d72cf0427c660d7eb32b54586b37a97f3ae52061`,
   based on `1a72df984914fb9929d35b1217619178133d65a4`.
 - metal2vulkan Windows branch: tqmane/metal2vulkan `8556e6e4fe54fd8edcf45d48415242a2ac875421`,
   based on `13b279df1bf87893d389f955a90c55b6ff3d0f9b`.
@@ -49,18 +52,32 @@ through MAILBOX on the Vulkan swapchain. This diagnostic never ran a guest
 CPU. Normal start refuses unavailable WHPX and does not fall back to TCG.
 The prepared snapshot is an empty install baseline, not an installed macOS.
 
+After restart, WHvGetCapability and Win32_ComputerSystem both report a
+running hypervisor. The enforced Haswell CPU string masks only ARAT, which
+WHPX does not expose on this host, and uses a supported Haswell stepping 3.
+MSR_CORE_THREAD_COUNT now uses QEMU's existing topology helper, matching the
+eight ACPI processors. OpenPartitionDxe enables detection of the
+APM/HFS+ installer. QMP CLI status, key input, absolute mouse events and guest
+screendumps work on the actual WHPX VM. Recovery's sw_vers confirms 26.4,
+25E246; csrutil reports enabled. The verified empty 128 GiB overlay is
+GPT/APFS, with a Reims volume. Guest-command shutdown worked, and an offline
+before-install snapshot was created. Recovery ignored QMP powerdown within
+15 seconds; installed-system shutdown still needs verification.
+
 The selected RTX 4070 SUPER, Windows driver 616.56, passed native host-import,
 CPU/GPU copy/fill and authored Metal AIR compute-pipeline tests. See
 TEST_RESULTS.md for scope and KNOWN_ISSUES.md for remaining checks.
 
-## Required user step and continuation
+## Continuation
 
-Run scripts/windows/enable-whpx.ps1 in an administrator PowerShell, save
-other work and restart Windows. Then run doctor.ps1 -RequireWhpx and
-start.ps1. Only the user may accept the installer agreement and enter account
-credentials. The accompanying Apple license must be considered; see
+Use scripts/windows/start.ps1 and qmp.ps1 for CLI operation. Diagnose the
+installer from serial output and guest screendumps. Only the user may
+accept the installer agreement. Use the account and region supplied by the
+owner; keep passwords out of source files, command lines and logs.
+The accompanying Apple license must be considered; see
 windows-vm.md and windows-native-audit.md.
 
-WHPX guest boot, installation, desktop/reboot, Liquid Glass and workload FPS
+License acceptance, installation, desktop/reboot, guest Metal, Liquid Glass
+and workload FPS
 remain unverified. No 60/120 FPS result is claimed. Private evidence is in
 .work/diagnostics/ and vm/logs/. Generated binaries, guests and logs are ignored.

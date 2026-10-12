@@ -108,7 +108,7 @@ if (!(Test-Path -LiteralPath $vars)) { Copy-Item -LiteralPath $oc.firmware_vars_
 $random = [Security.Cryptography.RandomNumberGenerator]::GetBytes(3)
 $config = [ordered]@{
     schema = 1; cpus = 8; memory_mib = 8192; resolution = '1920x1080'; disk_gib = 128
-    cpu = 'Haswell-noTSX,vendor=GenuineIntel,+ssse3,+sse4.2,+popcnt,+avx,+avx2,+aes,+xsave,+xsaveopt,enforce'
+    cpu = 'Haswell-noTSX,stepping=3,vendor=GenuineIntel,+ssse3,+sse4.2,+popcnt,+avx,+avx2,+aes,+xsave,+xsaveopt,-arat,enforce'
     mac = '52:54:00:' + (($random | ForEach-Object { $_.ToString('x2') }) -join ':')
     qmp_port = $QmpPort; ssh_port = $SshPort; iso = $Iso; media_kind = $media.media_kind
     base_disk = $baseDisk; active_disk = $activeDisk; opencore = $oc.image
