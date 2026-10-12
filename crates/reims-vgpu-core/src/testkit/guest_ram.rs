@@ -9,13 +9,16 @@
 
 #![allow(unsafe_code)] // architecture 17.3: fake/guest_ram.rs
 
-use std::alloc::{Layout, alloc_zeroed};
+use std::alloc::Layout;
 use std::sync::Arc;
 
 use crate::sync::Mutex;
 
 use crate::host::{HostPtr, PhysicalMemoryRange};
 use crate::num::{ToU64, ToUsize};
+
+mod allocation;
+use allocation::alloc_zeroed;
 
 // A vCPU's one 16-byte store and load, in one file per architecture.
 #[cfg_attr(target_arch = "aarch64", path = "guest_ram/raw/aarch64.rs")]
@@ -201,7 +204,7 @@ impl Drop for RawRegion {
     fn drop(&mut self) {
         if let Some(layout) = self.layout {
             // SAFETY: `ptr` came from `alloc_zeroed(layout)` and is freed once, here.
-            unsafe { std::alloc::dealloc(self.ptr, layout) };
+            unsafe { allocation::dealloc(self.ptr, layout) };
         }
     }
 }

@@ -33,6 +33,10 @@ parking_lot.workspace = true
 # `fstat` and the host's page size, for the files behind a memory map's ranges.
 libc.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows always uses Vulkan, including when the C crate's default features are disabled.
+reims-vgpu = { workspace = true, features = ["vulkan"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # `exception::catch` around every call of a host function (`ffi::host_call`, `ffi/catch/macos.rs`).
 objc2.workspace = true

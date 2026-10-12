@@ -7,15 +7,12 @@
 //! `ffi::host_call`: a host function that raises ends the process at the call.
 
 use std::ffi::c_void;
-use std::mem::MaybeUninit;
-use std::num::NonZeroU64;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use reims_vgpu::{
     AddTraceRange, CreateTask, DestroyTask, Device, DeviceConfig, Error, HostCallbacks, HostPtr,
-    HostTask, HostTraceRange, MapMemory, MemoryFile, MemoryMap, PhysicalMemoryRange,
-    RaiseInterrupt, ReadMemory, RemoveTraceRange, UnmapMemory,
+    HostTask, HostTraceRange, MapMemory, MemoryMap, PhysicalMemoryRange, RaiseInterrupt,
+    ReadMemory, RemoveTraceRange, UnmapMemory,
 };
 
 use crate::ffi;
@@ -25,6 +22,8 @@ use crate::status::{RVG_ERR_INVALID_ARGUMENT, RVG_OK, RvgStatus, status};
 use crate::table::{RvgDestroyFn, Table, WithTable};
 use crate::trace::RvgTraceRangeHandler;
 use crate::{Plat, null_handle};
+
+mod memory;
 
 /// Why a resume refused its state: one of RVG_RESUME_ERROR_*.
 pub type RvgResumeError = u32;
@@ -248,7 +247,7 @@ pub struct RvgMemoryMap {
 }
 
 /// The file behind one range of a memory map: the range's host memory is a shared mapping
-/// (MAP_SHARED) of `fd` from byte `offset`. Plain data.
+/// (MAP_SHARED) of `fd` from byte `offset`. Plain data; Unix hosts only.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RvgMemoryRangeFile {
@@ -262,6 +261,24 @@ pub struct RvgMemoryRangeFile {
 }
 
 const _: () = assert!(size_of::<RvgMemoryRangeFile>() == 16);
+
+/// The Windows section behind one memory range, shared with the host's `host_address`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RvgMemoryRangeSection {
+    /// A file-mapping HANDLE as a u64, duplicated at create; 0 for no backing section.
+    pub handle: u64,
+    /// The range's first byte in the section, a multiple of the host's page size.
+    pub offset: u64,
+    /// The section's total length; `offset + physical_length` must fit in it.
+    pub length: u64,
+    /// 0; other values are refused.
+    pub flags: u32,
+    /// 0; other values are refused.
+    pub reserved: u32,
+}
+
+const _: () = assert!(size_of::<RvgMemoryRangeSection>() == 32);
 
 /// The device's config.
 #[repr(C)]
@@ -304,6 +321,12 @@ pub struct RvgDeviceConfig {
     /// not a multiple of the host's page size: RVG_ERR_INVALID_ARGUMENT, in that order, before
     /// any file is duplicated.
     pub memory_files: *const RvgMemoryRangeFile,
+    /// With `memory_map`, one Windows section per range, in the same order; NULL for none.
+    /// Windows refuses non-NULL `memory_files`; macOS and Linux refuse non-NULL sections.
+    /// Flags and reserved must be zero, the requested range must fit `length`, and each
+    /// nonzero handle must map that range with write access before any handle is duplicated.
+    /// Refusals are RVG_ERR_INVALID_ARGUMENT; handles are duplicated without inheritance.
+    pub memory_sections: *const RvgMemoryRangeSection,
 }
 
 // SAFETY: repr(C), a u32 first; integers, bools and pointers.
@@ -315,6 +338,7 @@ unsafe impl HostStruct for RvgDeviceConfig {
 
 const _: () =
     assert!(std::mem::offset_of!(RvgDeviceConfig, memory_files) == RvgDeviceConfig::V1_SIZE);
+const _: () = assert!(std::mem::offset_of!(RvgDeviceConfig, memory_sections) == 56);
 
 /// The device: one paravirtualized GPU and its display ports.
 pub struct RvgDevice {
@@ -333,23 +357,24 @@ pub struct RvgBytes {
     pub length: usize,
 }
 
-/// The Rust API's map of a host's `RvgMemoryMap`, with the files behind its ranges
-/// (`RvgDeviceConfig.memory_files`, NULL for none). `Err(RVG_ERR_INVALID_ARGUMENT)`, in this
+/// The Rust API's map of a host's `RvgMemoryMap`, with the files or Windows sections behind its
+/// ranges (NULL for none). `Err(RVG_ERR_INVALID_ARGUMENT)`, in this
 /// order: ranges that are NULL but counted; files without a map; a file entry
-/// [`file_refusal`] refuses, the first range's first; a file that cannot be duplicated. Each
+/// `file_refusal` refuses, the first range's first; a file that cannot be duplicated. Each
 /// file is duplicated only once every entry has passed, so a refusal before then touches no
 /// file. A refusal of the files logs a line saying which.
 ///
 /// # Safety
 /// `map` is NULL or a live map whose `ranges` hold `range_count` ranges; `files` is NULL or
-/// holds `range_count` entries.
+/// holds `range_count` entries; `sections` is NULL or holds that many section entries.
 pub(crate) unsafe fn memory_map(
     map: *const RvgMemoryMap,
     files: *const RvgMemoryRangeFile,
+    sections: *const RvgMemoryRangeSection,
 ) -> Result<Option<MemoryMap>, RvgStatus> {
     // SAFETY: the caller's contract.
     let Some(map) = (unsafe { map.as_ref() }) else {
-        if !files.is_null() {
+        if !files.is_null() || !sections.is_null() {
             log::warn!("device not created: memory files without a memory map");
             return Err(RVG_ERR_INVALID_ARGUMENT);
         }
@@ -363,38 +388,10 @@ pub(crate) unsafe fn memory_map(
         // SAFETY: the caller's contract.
         unsafe { std::slice::from_raw_parts(map.ranges, map.range_count) }
     };
-    let files: &[RvgMemoryRangeFile] = if files.is_null() || ranges.is_empty() {
-        &[]
-    } else {
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(files, ranges.len()) }
-    };
-    let page = host_page_size();
-    for (i, (r, f)) in ranges.iter().zip(files).enumerate() {
-        if let Some(why) = file_refusal(r, f, page) {
-            log::warn!("device not created: the file of memory range {i} {why}");
-            return Err(RVG_ERR_INVALID_ARGUMENT);
-        }
-    }
+    // SAFETY: validated ranges, and the caller's matching descriptor arrays.
+    let files = unsafe { memory::files(ranges, files, sections) }?;
     let mut m = MemoryMap::new();
-    for (i, r) in ranges.iter().enumerate() {
-        let file = match files.get(i) {
-            Some(f) if f.fd >= 0 => match duplicate(f.fd) {
-                Ok(fd) => Some(MemoryFile {
-                    fd: Arc::new(fd),
-                    offset: f.offset,
-                }),
-                Err(e) => {
-                    log::warn!(
-                        "device not created: the file of memory range {i}, fd {}, was not \
-                         duplicated: {e}",
-                        f.fd
-                    );
-                    return Err(RVG_ERR_INVALID_ARGUMENT);
-                }
-            },
-            _ => None,
-        };
+    for (r, file) in ranges.iter().zip(files) {
         // SAFETY: the header's contract on `host_address`: mapped while any device made over
         // the map lives, and, with a file, a shared mapping of it from `offset`.
         unsafe {
@@ -407,78 +404,6 @@ pub(crate) unsafe fn memory_map(
         }
     }
     Ok(Some(m))
-}
-
-/// Why the file entry `f` of range `r` is refused, as the end of a log line, or `None`: an `fd`
-/// below -1, `flags` other than 0, and for an `fd` of 0 or more, a file `fstat` cannot read, one
-/// holding fewer than `offset + physical_length` bytes, or an `offset` that is not a multiple of
-/// `page`, in that order.
-fn file_refusal(r: &RvgMemoryRange, f: &RvgMemoryRangeFile, page: NonZeroU64) -> Option<String> {
-    if f.fd < -1 {
-        return Some(format!("has fd {}, below -1", f.fd));
-    }
-    if f.flags != 0 {
-        return Some(format!("has flags {:#x}, not 0", f.flags));
-    }
-    if f.fd == -1 {
-        return None;
-    }
-    let size = match file_size(f.fd) {
-        Ok(size) => size,
-        Err(e) => return Some(format!("has fd {}, which fstat cannot read: {e}", f.fd)),
-    };
-    if f.offset
-        .checked_add(r.physical_length)
-        .is_none_or(|end| size < end)
-    {
-        return Some(format!(
-            "holds {size:#x} bytes, fewer than its offset {:#x} and the range's {:#x}",
-            f.offset, r.physical_length
-        ));
-    }
-    if f.offset % page != 0 {
-        return Some(format!(
-            "has offset {:#x}, not a multiple of the page size {page:#x}",
-            f.offset
-        ));
-    }
-    None
-}
-
-/// The host's page size (`sysconf(_SC_PAGESIZE)`, which does not fail): 16 KiB on arm64 macOS,
-/// 4 KiB on x86-64.
-fn host_page_size() -> NonZeroU64 {
-    // SAFETY: a query of a constant; it reads and writes no memory of the caller's.
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    u64::try_from(page)
-        .ok()
-        .and_then(NonZeroU64::new)
-        .unwrap_or(NonZeroU64::MIN)
-}
-
-/// The size of the file `fd` names (`fstat`).
-fn file_size(fd: i32) -> std::io::Result<u64> {
-    let mut st = MaybeUninit::<libc::stat>::zeroed();
-    // SAFETY: `st` is a writable `struct stat`; an `fd` that names no open file is an error the
-    // call returns.
-    if unsafe { libc::fstat(fd, st.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `fstat` succeeded, so it filled `st`; it was zeroed before.
-    let st = unsafe { st.assume_init() };
-    Ok(u64::try_from(st.st_size).unwrap_or(0))
-}
-
-/// A duplicate of `fd`, close-on-exec (`fcntl(F_DUPFD_CLOEXEC)`), which the map holds.
-fn duplicate(fd: i32) -> std::io::Result<OwnedFd> {
-    // SAFETY: `fcntl` reads and writes no memory of the caller's; an `fd` that names no open
-    // file is an error the call returns.
-    let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-    if new < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `new` is a descriptor this call opened, owned by nothing else.
-    Ok(unsafe { OwnedFd::from_raw_fd(new) })
 }
 
 /// The host's task pointer as the Rust API's value, and back.
@@ -628,10 +553,11 @@ pub unsafe extern "C" fn rvg_device_create(
             return refuse(RVG_ERR_INVALID_ARGUMENT);
         }
         // SAFETY: the config's contract: NULL or a live map, and NULL or its files.
-        let memory_map = match unsafe { memory_map(c.memory_map, c.memory_files) } {
-            Ok(m) => m,
-            Err(s) => return refuse(s),
-        };
+        let memory_map =
+            match unsafe { memory_map(c.memory_map, c.memory_files, c.memory_sections) } {
+                Ok(m) => m,
+                Err(s) => return refuse(s),
+            };
         let config = DeviceConfig {
             metal_registry_id: (c.metal_registry_id != 0).then_some(c.metal_registry_id),
             display_port_count: c.display_port_count,

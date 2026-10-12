@@ -14,8 +14,8 @@
 //!
 //! The exports are made over [`Plat`]: the product's `MetalPlatform`, or with the `vulkan`
 //! feature the proof of concept's `VulkanPlatform`, and core's testkit platform in this crate's
-//! unit tests, which then run the product's code. On Linux the crate builds only with the
-//! `vulkan` feature, since Metal is macOS's.
+//! unit tests, which then run the product's code. Linux requires the `vulkan` feature;
+//! Windows always uses Vulkan, since Metal is macOS's.
 
 // With the `vulkan` feature, a debug build's proof that the runtime's types are `Send` and `Sync`
 // nests deeper than rustc's default limit of 128 (E0275).
@@ -44,12 +44,15 @@ pub use status::RvgStatus;
 #[cfg(all(target_os = "linux", not(feature = "vulkan")))]
 compile_error!("on Linux, reims-vgpu-c builds only with the `vulkan` feature (VulkanPlatform)");
 
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("reims-vgpu-c supports only macOS, Linux and Windows");
+
 /// The platform every handle is made on.
-#[cfg(not(any(test, feature = "vulkan")))]
+#[cfg(all(not(any(test, feature = "vulkan")), target_os = "macos"))]
 pub(crate) type Plat = reims_vgpu::MetalPlatform;
 /// The platform every handle is made on, with the `vulkan` feature: the proof of concept over
 /// metal2vulkan's runtime (architecture 2.2).
-#[cfg(all(not(test), feature = "vulkan"))]
+#[cfg(all(not(test), any(feature = "vulkan", target_os = "windows")))]
 pub(crate) type Plat = reims_vgpu::VulkanPlatform;
 /// The platform every handle is made on: core's testkit platform in this crate's unit tests.
 #[cfg(test)]

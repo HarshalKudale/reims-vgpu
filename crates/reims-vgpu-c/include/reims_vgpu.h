@@ -387,7 +387,7 @@ typedef struct {
 } RvgHostCallbacks;
 
 // The file behind one range of a memory map: the range's host memory is a shared mapping
-// (MAP_SHARED) of `fd` from byte `offset`. Plain data.
+// (MAP_SHARED) of `fd` from byte `offset`. Plain data; Unix hosts only.
 typedef struct {
   // An open file descriptor, which the library duplicates during the create (the host may
   // close its own afterwards), or -1 for a range with no file.
@@ -397,6 +397,20 @@ typedef struct {
   // The file offset of the range's first byte, a multiple of the host's page size.
   uint64_t offset;
 } RvgMemoryRangeFile;
+
+// The Windows section behind one memory range, shared with the host's `host_address`.
+typedef struct {
+  // A file-mapping HANDLE as a u64, duplicated at create; 0 for no backing section.
+  uint64_t handle;
+  // The range's first byte in the section, a multiple of the host's page size.
+  uint64_t offset;
+  // The section's total length; `offset + physical_length` must fit in it.
+  uint64_t length;
+  // 0; other values are refused.
+  uint32_t flags;
+  // 0; other values are refused.
+  uint32_t reserved;
+} RvgMemoryRangeSection;
 
 // The device's config.
 typedef struct {
@@ -437,6 +451,12 @@ typedef struct {
   // not a multiple of the host's page size: RVG_ERR_INVALID_ARGUMENT, in that order, before
   // any file is duplicated.
   const RvgMemoryRangeFile *memory_files;
+  // With `memory_map`, one Windows section per range, in the same order; NULL for none.
+  // Windows refuses non-NULL `memory_files`; macOS and Linux refuse non-NULL sections.
+  // Flags and reserved must be zero, the requested range must fit `length`, and each
+  // nonzero handle must map that range with write access before any handle is duplicated.
+  // Refusals are RVG_ERR_INVALID_ARGUMENT; handles are duplicated without inheritance.
+  const RvgMemoryRangeSection *memory_sections;
 } RvgDeviceConfig;
 
 // Bytes the library allocated; free them with rvg_bytes_free.

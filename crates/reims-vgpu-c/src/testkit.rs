@@ -217,6 +217,7 @@ pub(crate) fn config(ports: u32, table: &RvgHostCallbacks) -> RvgDeviceConfig {
         memory_map: std::ptr::null(),
         callbacks: table,
         memory_files: std::ptr::null(),
+        memory_sections: std::ptr::null(),
     }
 }
 
@@ -277,4 +278,9 @@ pub(crate) unsafe extern "C-unwind" fn t_add_trace(
     _h: *mut RvgTraceRangeHandler,
 ) -> *mut c_void {
     std::ptr::null_mut()
+}
+
+/// Whether std aborted the process, using its native status rather than a fabricated signal.
+pub(crate) fn aborted(status: std::process::ExitStatus) -> bool {
+    reims_vgpu_core::testkit::death::aborted(status)
 }

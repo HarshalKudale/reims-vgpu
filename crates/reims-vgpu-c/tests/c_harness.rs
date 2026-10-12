@@ -5,7 +5,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
-use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,19 +24,20 @@ fn crate_dir() -> PathBuf {
 /// Compiles `source` into `out`; panics with the compiler's output.
 fn compile(source: &Path, out: &Path) {
     let deps = deps_dir();
-    let status = Command::new("cc")
+    let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let mut command = Command::new(compiler);
+    command
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic"])
         .arg("-I")
         .arg(crate_dir().join("include"))
         .arg(source)
         .arg("-L")
         .arg(&deps)
-        .arg("-lreims_vgpu_c")
-        .arg(format!("-Wl,-rpath,{}", deps.display()))
-        .arg("-o")
-        .arg(out)
-        .output()
-        .unwrap();
+        .arg("-lreims_vgpu_c");
+    if cfg!(unix) {
+        command.arg(format!("-Wl,-rpath,{}", deps.display()));
+    }
+    let status = command.arg("-o").arg(out).output().unwrap();
     assert!(
         status.status.success(),
         "cc failed:\n{}",
@@ -64,7 +64,7 @@ fn harness(name: &str) -> Harness {
     let dir = std::env::temp_dir().join(format!("rvg-api-harness-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let bin = dir.join("harness");
+    let bin = dir.join(format!("harness{}", std::env::consts::EXE_SUFFIX));
     compile(&crate_dir().join("tests/c/harness.c"), &bin);
     Harness { dir, bin }
 }
@@ -73,7 +73,10 @@ fn harness(name: &str) -> Harness {
 #[test]
 fn c_harness_passes() {
     let h = harness("run");
-    let out = Command::new(&h.bin).output().unwrap();
+    let out = Command::new(&h.bin)
+        .current_dir(deps_dir())
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}\n{}",
@@ -87,8 +90,15 @@ fn c_harness_passes() {
 #[test]
 fn c_harness_null_handle_aborts() {
     let h = harness("die");
-    let out = Command::new(&h.bin).arg("die-null").output().unwrap();
-    assert_eq!(out.status.signal(), Some(6), "{out:?}");
+    let out = Command::new(&h.bin)
+        .current_dir(deps_dir())
+        .arg("die-null")
+        .output()
+        .unwrap();
+    assert!(
+        reims_vgpu_core::testkit::death::aborted(out.status),
+        "{out:?}"
+    );
     assert!(!String::from_utf8_lossy(&out.stdout).contains("survived"));
 }
 
@@ -122,7 +132,8 @@ fn header_compiles_as_cxx_and_objc() {
     let include = crate_dir().join("include");
     let objc = cfg!(target_os = "macos").then_some(("objective-c", "-std=c11"));
     for (lang, std) in std::iter::once(("c++", "-std=c++17")).chain(objc) {
-        let out = Command::new("cc")
+        let compiler = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let out = Command::new(compiler)
             .args(["-x", lang, std, "-fsyntax-only", "-Wall", "-Werror", "-I"])
             .arg(&include)
             .arg("-")

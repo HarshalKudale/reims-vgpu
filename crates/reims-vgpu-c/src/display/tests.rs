@@ -331,7 +331,6 @@ fn child_a_display_released_with_a_job_queued() {
 /// job, as it did on the host's queue: the job reads the handler when it runs
 #[test]
 fn a_display_released_with_a_job_queued_dies() {
-    use std::os::unix::process::ExitStatusExt as _;
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -343,7 +342,7 @@ fn a_display_released_with_a_job_queued_dies() {
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.signal(), Some(6), "{out:?}");
+    assert!(crate::testkit::aborted(out.status), "{out:?}");
     assert!(err.contains("RELEASED"), "{err}");
     assert!(
         err.contains("guest_display.cursor.move_handler_gone"),
