@@ -89,6 +89,38 @@ try {
     Assert-Condition (!(Get-ReimsQemuArguments $config $testRoot -WithoutInstaller | Where-Object { $_ -like 'id=installer,*' })) 'Installer can be ejected at the next boot'
     Assert-Condition ((ConvertTo-ReimsQemuPath 'x:\comma,path\file') -eq 'x:/comma,,path/file') 'QEMU paths escape commas'
 
+    $ocAst = [scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $sourceScripts 'prepare-opencore.ps1'))).Ast
+    $accountPatch = $ocAst.Find({ param($node)
+        $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+        $node.Value.StartsWith('import pathlib, plistlib, sys')
+    }, $true).Value
+    $patchTest = @'
+import pathlib, plistlib, sys
+script=sys.stdin.read()
+r=pathlib.Path(sys.argv[1]); source=r/'account.plist'; dest=r/'account-new.plist'
+original={'Kernel':{'Patch':[{'Comment':'unrelated','Enabled':True}]},'PlatformInfo':{'Generic':{'SystemSerialNumber':'fixture'}}}
+source.write_bytes(plistlib.dumps(original))
+def run(mode):
+    sys.argv=['fixture',str(source),str(dest),mode]
+    exec(script, {})
+    return plistlib.loads(dest.read_bytes())
+c=run('Enable'); patches=c['Kernel']['Patch']
+assert len(patches)==3 and patches[0]==original['Kernel']['Patch'][0]
+assert c['PlatformInfo']==original['PlatformInfo']
+for p in patches[1:]:
+    assert p['Count']==1 and p['Arch']=='x86_64' and p['MinKernel']==p['MaxKernel']=='25.4.0'
+    assert len(p['Find'])==len(p['Replace'])
+source.write_bytes(dest.read_bytes()); assert run('Enable')==c
+assert run('Disable')==original
+try: run('invalid')
+except ValueError: pass
+else: raise AssertionError('Unknown mode accepted')
+'@
+    $patchTestPath = Join-Path $testRoot 'account-patch-test.py'
+    $patchTest | Set-Content -LiteralPath $patchTestPath -Encoding utf8NoBOM
+    $accountPatch | & $python $patchTestPath $testRoot
+    Assert-Condition ($LASTEXITCODE -eq 0) 'Account compatibility is version-bounded, reversible and preserves unrelated settings'
+
     # Execute the media parser from the script against synthetic, non-Apple inputs.
     $mediaAst = [scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $sourceScripts 'prepare-vm.ps1'))).Ast
     $mediaParser = $mediaAst.Find({ param($node)

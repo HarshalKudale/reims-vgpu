@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$Root,
-    [ValidateSet('Status','Setup','BuildEngine','EnableWhpx','Start','PowerOff','Restart','Exit','ForceExit','Pause','Resume','SnapshotCreate','SnapshotRestore','GenerateIdentity','SetResolution','ApplyResolution','SetNetwork','SetHardware','ExpandDisk','CreateBridge','InstallTap','Pair','CollectLogs')][string]$Action = 'Status',
+    [ValidateSet('Status','Setup','BuildEngine','EnableWhpx','Start','PowerOff','Restart','Exit','ForceExit','Pause','Resume','SnapshotCreate','SnapshotRestore','GenerateIdentity','EnableAppleAccount','DisableAppleAccount','SetResolution','ApplyResolution','SetNetwork','SetHardware','ExpandDisk','CreateBridge','InstallTap','Pair','CollectLogs')][string]$Action = 'Status',
     [string]$Iso,
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')][string]$Name,
     [ValidateSet('1280x720','1920x1080','2560x1440','3840x2160')][string]$Resolution = '1920x1080',
@@ -131,6 +131,8 @@ switch ($Action) {
     SnapshotCreate { & "$PSScriptRoot/snapshot.ps1" -Action Create -Name $Name }
     SnapshotRestore { & "$PSScriptRoot/snapshot.ps1" -Action Restore -Name $Name }
     GenerateIdentity { & "$PSScriptRoot/prepare-opencore.ps1" -GenerateIdentity -Rebuild }
+    EnableAppleAccount { & "$PSScriptRoot/prepare-opencore.ps1" -AppleAccountCompatibility Enable -Rebuild }
+    DisableAppleAccount { & "$PSScriptRoot/prepare-opencore.ps1" -AppleAccountCompatibility Disable -Rebuild }
     SetResolution {
         Assert-ReimsVmStopped
         $config = Get-ReimsVmConfig

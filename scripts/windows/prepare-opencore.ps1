@@ -5,11 +5,13 @@ param(
     [string]$QemuImg,
     [string]$FirmwareDirectory,
     [switch]$GenerateIdentity,
+    [ValidateSet('Keep','Enable','Disable')][string]$AppleAccountCompatibility = 'Keep',
     [switch]$Rebuild
 )
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 Assert-ReimsVmStopped
 if ($GenerateIdentity -and !$Rebuild) { throw 'Use -GenerateIdentity with -Rebuild.' }
+if ($AppleAccountCompatibility -ne 'Keep' -and !$Rebuild) { throw 'Use -AppleAccountCompatibility with -Rebuild.' }
 $downloads = Join-Path $ProjectRoot '.work/downloads'
 $releasePath = Join-Path $downloads "OpenCore-$Version-release.json"
 if (!(Test-Path -LiteralPath $releasePath)) {
@@ -109,6 +111,35 @@ manifest.write_text(json.dumps(i, indent=2) + '\n', encoding='utf-8')
     "Generated a VM-specific identity; preserved SystemUUID. Backup: $backup"
 }
 $validate = Join-Path $package 'Utilities/ocvalidate/ocvalidate.exe'
+if ($AppleAccountCompatibility -ne 'Keep') {
+    $backup = Join-Path $ProjectRoot ('.work/diagnostics/opencore-before-account-' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff') + '.plist')
+    Copy-Item -LiteralPath $plist -Destination $backup
+    $candidate = "$backup.candidate"
+    $accountCompatibility = @'
+import pathlib, plistlib, sys
+source, destination, mode = sys.argv[1:]
+c = plistlib.loads(pathlib.Path(source).read_bytes())
+prefix = 'Reims Tahoe 25.4.0 '
+c['Kernel']['Patch'] = [p for p in c['Kernel']['Patch'] if not p.get('Comment', '').startswith(prefix)]
+if mode == 'Enable':
+    # Keep CPU virtualization for boot; exchange only the two userspace sysctl names.
+    pairs = [('compatibility counter', 'hibernatehidready\0hibernatecount\0', 'hibernatehidready\0hv_vmm_present\0'),
+             ('virtual-machine query', 'boot session UUID\0hv_vmm_present\0', 'boot session UUID\0hibernatecount\0')]
+    for label, find, replace in pairs:
+        assert len(find) == len(replace)
+        c['Kernel']['Patch'].append(dict(Arch='x86_64', Base='', Comment=prefix + label,
+            Count=1, Enabled=True, Find=find.encode(), Identifier='kernel', Limit=0, Mask=b'',
+            MinKernel='25.4.0', MaxKernel='25.4.0', Replace=replace.encode(), ReplaceMask=b'', Skip=0))
+elif mode != 'Disable':
+    raise ValueError('Unknown Apple Account compatibility mode')
+pathlib.Path(destination).write_bytes(plistlib.dumps(c, sort_keys=False))
+'@
+    $accountCompatibility | & $python - $plist $candidate $AppleAccountCompatibility
+    if ($LASTEXITCODE -ne 0) { throw 'Apple Account compatibility update failed; the original config is unchanged.' }
+    Invoke-ReimsTool $validate @($candidate) | Out-Null
+    Move-Item -LiteralPath $candidate -Destination $plist -Force
+    "Apple Account compatibility: $AppleAccountCompatibility (Darwin 25.4.0 only). Backup: $backup"
+}
 $validation = Invoke-ReimsTool $validate @($plist)
 $validation | Set-Content -LiteralPath (Join-Path $destination 'ocvalidate.log') -Encoding utf8NoBOM
 $image = Join-Path $destination 'OpenCore.img'

@@ -70,8 +70,8 @@ and preserves the installed SystemUUID and Mac model. Values and backups
 remain in ignored private state. Repeated setup retains this identity.
 This prepares SMBIOS; only an actual sign-in can establish that Apple
 Account services accept it. The app does not collect Apple credentials.
-The current guest fails AppleVirtualPlatform device identity provisioning;
-see [the measured Apple Account limitation](windows-apple-account.md).
+The tested Tahoe 26.4 guest signs in over NAT after the OpenCore compatibility
+setting and WHPX clock fix; see [the measured Apple Account setup](windows-apple-account.md).
 The Windows JIS repair and physical-key checks are recorded in
 [windows-jis-keyboard.md](windows-jis-keyboard.md).
 

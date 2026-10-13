@@ -71,7 +71,9 @@
     <TextBlock Text="macOS のパスワードは保存しません。SSH の秘密鍵はプロジェクト内に保持します。"/>
     <TextBlock Text="OpenCore の識別情報" FontSize="20" FontWeight="SemiBold" Margin="0,28,0,12"/>
     <TextBlock Text="SMBIOS は初回セットアップ時に生成し、以後は保持します。再生成しても SystemUUID は保持します。Apple Account へのサインインは macOS で行います。"/>
-    <TextBlock Text="この Windows/WHPX 構成では Apple Account 用の VM 端末証明に未対応です。SMBIOS の生成だけではサインインできません。" Margin="0,12,0,0"/>
+    <TextBlock Text="Tahoe 26.4 のサインイン互換設定に対応しています。VM を終了してから適用し、起動後に macOS でサインインしてください。NAT でも利用できます。" Margin="0,12,0,0"/>
+    <WrapPanel Margin="0,12,0,0"><Button Content="Apple Account 互換設定を適用" Tag="EnableAppleAccount" Click="ActionClick"/><Button Content="互換設定を解除" Tag="DisableAppleAccount" Click="ActionClick"/></WrapPanel>
+    <TextBlock Text="この互換設定は Tahoe 26.4 専用です。休止状態は使用しないでください。macOS 更新後は対応確認が必要です。"/>
     <Button Content="SMBIOS を再生成…" Click="GenerateIdentity" HorizontalAlignment="Left" Margin="0,18,0,0"/>
    </StackPanel></ScrollViewer></TabItem>
   </TabControl>
