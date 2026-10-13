@@ -1480,9 +1480,17 @@ device behind the emulated hub did not enumerate as a disk in this guest.
 `CGDisplaySetDisplayMode` alone applied a mode only while its caller was
 alive. The manager uses a display-configuration transaction with permanent
 scope, then checks the resulting pixel dimensions. A separate process
-confirmed the restored 1920x1080 mode after the helper exited. The guest
-still reports a 6.4 GHz TSC while the host timer is about 3.18 GHz; this
-clock discrepancy remains unresolved.
+confirmed the restored 1920x1080 mode after the helper exited.
+
+WHPX's default Hyper-V enlightenment passthrough made this guest report a
+6.4 GHz TSC, and its clock advanced at roughly half wall-clock speed. On
+2026-10-13 it fell 107 seconds behind Windows within a few minutes of boot.
+`-accel whpx,hyperv=off` selects QEMU's measured frequency leaves instead:
+the same guest reports 3187201000 Hz, and SSH time samples stay within
+two seconds of the host (including command latency). This does not disable
+WHPX acceleration or the CPU hypervisor bit. The guest reached the desktop
+with the change. The native management checks passed 79 assertions; no GPU
+library or QEMU binary changed.
 
 On the tested Windows Apple JIS keyboard, Eisu/Kana reached a foreground
 message probe as virtual keys 0x1a/0x16 with scancodes 0xf1/0xf2. The Raw

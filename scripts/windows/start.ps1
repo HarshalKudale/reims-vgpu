@@ -161,9 +161,10 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         displays = 1; resolution = $Config.resolution; romfile = $Config.rom.Replace('\', '/')
         'display-modes' = @("$($Config.resolution)@60", '1280x720@60', '1920x1080@60', '2560x1440@60', '3840x2160@60') | Select-Object -Unique
     }
+    # macOS needs QEMU's measured TSC leaf; Hyper-V passthrough reported 6.4 GHz for a 3.187 GHz clock.
     $qemuArguments = @(
         '-L', (ConvertTo-ReimsQemuPath (Join-Path $ProjectRoot 'vendor/qemu/pc-bios')),
-        '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx' }),
+        '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx,hyperv=off' }),
         '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',
         '-device', 'pcie-root-port,bus=pcie.0,addr=0x1,slot=1,x-speed=16,x-width=32',

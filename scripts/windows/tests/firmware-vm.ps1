@@ -64,7 +64,7 @@ try {
     Assert-Throws { Get-ReimsVmConfig } 'base disk directly'
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
-    Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx') 'WHPX is the sole default accelerator'
+    Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off') 'WHPX uses QEMU clock-frequency leaves for macOS, without Hyper-V enlightenments'
     Assert-Condition ('tcg' -notin $command) 'No automatic TCG fallback'
     Assert-Condition ('-no-shutdown' -in $command) 'Normal power-off retains the QEMU process'
     Assert-Condition ($command[$command.IndexOf('-L') + 1] -eq (ConvertTo-ReimsQemuPath (Join-Path $testRoot 'vendor/qemu/pc-bios'))) 'ROM lookup is independent of the QEMU build directory'
