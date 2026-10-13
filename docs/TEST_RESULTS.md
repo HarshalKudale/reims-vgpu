@@ -31,7 +31,9 @@
 | Installation sealing | x86legacy passed board/digest verification, sealing and bless; guest reported success and rebooted to the Reims entry |
 | Retained process power-off/on | OpenCore guest Shutdown reached QMP shutdown; CLI start resumed the same PID |
 | Guest clock calibration | XNU 6.4 GHz disagrees with hypervisor/native host about 3.187 GHz |
-| Installed Tahoe/guest Metal/Liquid Glass/workload FPS | Pending installation |
+| Installed Tahoe Setup Assistant | Panels render through AppleParavirtGPU and native NVIDIA Vulkan; account setup ongoing |
+| Guest icon service / GPU stalls | Repeated iconservicesagent crashes and guest GPU hang reports; no host fatal in this run |
+| Desktop/guest Metal inventory/Liquid Glass/workload FPS | Pending setup and validation |
 
 NVIDIA evidence is for RTX 4070 SUPER (10de:2783), driver 616.56. Import
 alignment is 4096 bytes. Private and shared-section memory, including two

@@ -1,15 +1,15 @@
 # Windows native Tahoe implementation
 
 Windows Hypervisor Platform is enabled after the host restart. A real WHPX
-boot reaches the Tahoe 26.4 recovery UI. The new 128 GiB target is formatted
-as GPT/APFS, and recovery reports SIP enabled. This is not a completed
-Tahoe installation or a
-Liquid Glass correctness claim.
+boot reaches the installed Tahoe 26.4 Setup Assistant after successful
+sealing and bless. The new 128 GiB target is GPT/APFS, and recovery reports
+SIP enabled. Account setup and desktop validation are ongoing; this is not
+a Liquid Glass correctness or performance claim.
 
 ## Sources and toolchain
 
 - Reims base: steelbrain/reims-vgpu `9b2c5452de94a474cba28d80d7f99d9d7b19ffe3`.
-- QEMU Windows branch: tqmane/qemu-reims-vgpu `d72cf0427c660d7eb32b54586b37a97f3ae52061`,
+- QEMU Windows branch: tqmane/qemu-reims-vgpu `45807f2484d97db11943287d85fdee37e7ff991a`,
   based on `1a72df984914fb9929d35b1217619178133d65a4`.
 - metal2vulkan Windows branch: tqmane/metal2vulkan `8556e6e4fe54fd8edcf45d48415242a2ac875421`,
   based on `13b279df1bf87893d389f955a90c55b6ff3d0f9b`.
@@ -92,7 +92,9 @@ preserves that state. OpenCore's guest Shutdown and CLI start also powered
 off/on in the same QEMU process. The XNU/hypervisor clock-frequency discrepancy
 remains unresolved.
 
-Completed installation, desktop/reboot, guest Metal, Liquid Glass
-and workload FPS
-remain unverified. No 60/120 FPS result is claimed. Private evidence is in
+Setup Assistant renders through AppleParavirtGPU and the native NVIDIA
+Vulkan runtime. The guest repeatedly reports iconservicesagent crashes;
+the documented METAL_ERROR_MODE workaround still needs validation on this
+guest. Account setup, full desktop/reboot, guest Metal inventory, Liquid
+Glass and workload FPS remain unverified. No 60/120 FPS result is claimed. Private evidence is in
 .work/diagnostics/ and vm/logs/. Generated binaries, guests and logs are ignored.

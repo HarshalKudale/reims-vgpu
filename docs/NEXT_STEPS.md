@@ -20,9 +20,12 @@
    and region supplied by the owner; keep passwords out of source files,
    command lines and logs.
    Preserve SIP/AMFI settings and use the overlay chain.
-4. Validate the installed Tahoe desktop and restart, AppleParavirtGPU/Metal,
+4. Setup Assistant renders through AppleParavirtGPU/Vulkan. Complete account
+   setup, then validate the installed Tahoe desktop and restart, AppleParavirtGPU/Metal,
    Finder/Dock/Safari, WindowServer/kernel logs and Liquid Glass screenshots.
-   Compare METAL_ERROR_MODE only if the observed assertions require it.
+   The guest repeatedly reports iconservicesagent crashes. Inspect its
+   diagnostic reports, apply the documented METAL_ERROR_MODE setting and
+   compare crashes, icon rendering and latency on this guest.
 5. Use an active animation workload with benchmark.ps1; static or paused
    present counts are not FPS evidence. Compare exact rendering with
    REIMS_VGPU_EXACT=all, resolutions and cold/warm cache conditions. Add

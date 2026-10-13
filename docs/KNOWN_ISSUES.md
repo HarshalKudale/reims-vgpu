@@ -24,8 +24,13 @@
   this discrepancy resolved.
 - Recovery ignored QMP system_powerdown within 15 seconds. Its Terminal
   shutdown command exited cleanly; installed-system shutdown is unverified.
-- Completed installation, account setup, desktop/reboot,
-  Finder/Dock/Safari, Liquid Glass and sustained FPS have not been exercised.
+- Installed Tahoe reaches Setup Assistant and renders its panels through
+  AppleParavirtGPU/Vulkan. During that run, iconservicesagent crashes
+  repeatedly and the guest reports GPU hangs. No host fatal was logged.
+  Validate the documented METAL_ERROR_MODE setting, crash reports and an
+  active workload before concluding which delays it resolves.
+- Account setup, desktop/reboot, Finder/Dock/Safari, Liquid Glass and
+  sustained FPS remain unverified.
 - One legacy core test, tasks::shared::tests::data_from_virtual_offset::
   a_length_past_any_task_raises, requires a normal 32 GiB Vec allocation.
   It aborts on the current Windows memory/commit limit and remains unchanged.
