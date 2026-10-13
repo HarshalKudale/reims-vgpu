@@ -147,10 +147,25 @@ An existing VM's `vm/state/config.json` retains its settings; add
 `,stepping=3` after `Haswell-noTSX` and `,-arat` before `,enforce` in its CPU
 string.
 
+Normal launches retain WHPX's kernel interrupt controller. Reset now clears
+the native MTRRs as x86 CPU reset does: leaving their fixed-range enable bit
+set caused OVMF's `MemDetect.c` assertion on warm boot. XSAVE buffer size is
+negotiated with WHP, and reset writes the initial extended registers even
+while OSXSAVE is off. The eight-CPU reset returns to OpenCore with the same
+process. Runtime VP delete/create is excluded after an experimental run
+coincided with a host `HYPERVISOR_ERROR`.
+
 The picker waits for an explicit selection during installation. Serial
 kernel diagnostics are enabled without relaxing SIP or AMFI. After boot,
 recovery reports SIP enabled; OpenCore's temporary booter CSR bit for slide
 selection is restored before XNU receives it.
+
+The `j185` VM enables `Kernel/Quirks/ForceSecureBootScheme`, as required by
+the [OpenCore manual](https://raw.githubusercontent.com/acidanthera/OpenCorePkg/1.0.8/Docs/Configuration.tex)
+for a VM using a SecureBootModel other than `x86legacy`. It selects x86 IMG4
+verification to match the emulated board, retaining `j185`, signed DMG
+loading, CSR zero and AMFI. Without it, the installer rejected the board
+binding (`0x22` in its manifest, `0xf0` in the VMM scheme) with MSU 1130.
 
 Its `-L` path points to the pinned QEMU source's `pc-bios`, so relocating the
 executable does not lose its network/virtual APIC option ROMs.

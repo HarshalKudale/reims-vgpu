@@ -76,7 +76,7 @@ function Get-ReimsRuntime {
 
 function Assert-ReimsVmStopped {
     $runtime = Get-ReimsRuntime
-    if ($runtime -and (Get-ReimsVmProcess $runtime)) { throw 'Stop this VM before changing its disks or firmware.' }
+    if ($runtime -and (Get-ReimsVmProcess $runtime)) { throw 'Stop this VM with stop.ps1 -Exit before changing its disks or firmware.' }
 }
 
 function Invoke-ReimsQmp($Runtime, [string]$Command, [hashtable]$Arguments = @{}) {
@@ -180,10 +180,12 @@ if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
         throw "VM is $($status.status). Use qmp.ps1 to control it; start only powers on a shut-down VM."
     }
     $previous = Get-Content -Raw -LiteralPath (Join-Path $runtime.run_directory 'command.json') | ConvertFrom-Json
-    $expected = Get-ReimsQemuArguments $config $runtime.run_directory -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
+    # Launch-time -S does not constrain a retained VM's next power-on.
+    $original = @($previous.arguments | Where-Object { $_ -ne '-S' })
+    $expected = @(Get-ReimsQemuArguments $config $runtime.run_directory -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg | Where-Object { $_ -ne '-S' })
     if (![string]::Equals($runtime.executable, $Qemu, [StringComparison]::OrdinalIgnoreCase) -or
         $previous.headless -ne [bool]$Headless -or
-        (ConvertTo-Json -InputObject $previous.arguments -Compress) -ne (ConvertTo-Json -InputObject $expected -Compress)) {
+        (ConvertTo-Json -InputObject $original -Compress) -ne (ConvertTo-Json -InputObject $expected -Compress)) {
         throw 'Launch settings changed. Run stop.ps1 -Exit before starting with different disks, firmware, devices or options.'
     }
     Invoke-ReimsQmp $runtime 'system_reset' | Out-Null

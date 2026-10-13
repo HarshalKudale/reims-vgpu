@@ -18,7 +18,7 @@
 | Native NVIDIA authored AIR pipeline | 1 passed |
 | Native NVIDIA buffer copy/fill | 1 passed |
 | metal2vulkan focused checks | 10 host-memory CPU, 1 CRT-exit, 1 native GPU passed |
-| Firmware/VM/QMP/snapshot self-checks | 55 assertions passed, including ROM lookup, CLI and empty array results |
+| Firmware/VM/QMP/snapshot self-checks | 72 assertions passed, including retained-process power cycles, paused power-on and changed-option refusal |
 | PCI/RAM realization, reset, QMP quit and native Win32 window | Passed in paused TCG diagnostic |
 | Missing WHPX refusal | Passed; no fallback or guest boot |
 | Real WHPX firmware boot and CLI status/key/mouse/screen commands | Passed; booter reaches handoff to XNU |
@@ -27,7 +27,8 @@
 | Target GPT/APFS format and offline snapshot | Passed on the new 128 GiB overlay |
 | Recovery shutdown | Guest Terminal command passed; QMP powerdown timed out |
 | Installation stage 1 | Copied about 17.76 GiB and requested restart |
-| WHPX warm restart after stage 1 | Failed XSAVE reads/VP exit 4; process restart preserved disk |
+| WHPX warm restart | Native XSAVE/MTRR regressions passed; QMP reset and installer-requested reboot returned to OpenCore in the same process |
+| Installation sealing | Failed MSU 1130: user-space IMG4 board f0 disagrees with j185 manifest board 22; kernel ForceSecureBootScheme alone did not resolve it |
 | Guest clock calibration | XNU 6.4 GHz disagrees with hypervisor/native host about 3.187 GHz |
 | Installed Tahoe/guest Metal/Liquid Glass/workload FPS | Pending installation |
 

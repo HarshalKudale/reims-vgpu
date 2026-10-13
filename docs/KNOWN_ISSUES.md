@@ -4,10 +4,18 @@
   Haswell stepping and the core/thread count MSR. GPT/APFS preparation is
   complete. The user accepted the agreement; installation stage 1 copied
   approximately 17.76 GiB and reached its automatic restart.
-- That warm reset failed under WHPX: XSAVE reads returned HRESULT 80370301,
-  then virtual processors exited with unrecoverable exception code 4 and
-  QEMU paused. A full process restart preserved the disk and reached its
-  new macOS Installer entry. Warm reset still needs a source fix and proof.
+- WHPX warm reset now negotiates the native XSAVE buffer size and resets
+  extended, interrupt and MTRR state. QMP reset and an installer-requested
+  reboot returned to OpenCore in the same process. Retained-process power
+  cycles pass the QMP fixture; actual guest power-off/on still needs proof.
+- Installation reaches system-volume sealing, then fails MSU 1130. The
+  user-space IMG4 verifier selects VM board f0, while the j185 manifest
+  specifies board 22. DEBUG OpenCore confirms ForceSecureBootScheme was
+  applied to the kernel, but that alone does not fix user-space verification.
+  SIP/AMFI and signed-DMG policy remain enabled.
+- A discarded per-vCPU delete/recreate reset experiment preceded a host
+  HYPERVISOR_ERROR bugcheck. It is excluded from the current source. The
+  disk passed an offline qcow2 check; an exact kernel cause is unproven.
 - XNU reported RTCLOCK 6.4 GHz, while the Windows hypervisor capability and
   native RDTSC/QPC measurement report about 3.187 GHz. Clock calibration is
   being investigated; installer remaining-time and performance claims need

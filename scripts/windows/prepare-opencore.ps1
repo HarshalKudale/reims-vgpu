@@ -50,7 +50,7 @@ c['DeviceProperties']['Add'] = {}
 c['DeviceProperties']['Delete'] = {}
 c['Booter']['Quirks'].update(EnableWriteUnprotector=False, RebuildAppleMemoryMap=True, SyncRuntimePermissions=True)
 c['Kernel']['Emulate']['DummyPowerManagement'] = True
-c['Kernel']['Quirks'].update(AppleXcpmExtraMsrs=True, DisableLinkeditJettison=False)
+c['Kernel']['Quirks'].update(AppleXcpmExtraMsrs=True, DisableLinkeditJettison=False, ForceSecureBootScheme=True)
 c['Misc']['Boot'].update(HideAuxiliary=False, Timeout=0)
 c['Misc']['Debug'].update(AppleDebug=True, ApplePanic=True, DisplayLevel=0x80000042, Target=75)
 c['Misc']['Serial']['Init'] = True

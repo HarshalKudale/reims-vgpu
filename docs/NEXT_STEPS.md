@@ -10,7 +10,11 @@
 3. The user accepted the agreement, and stage 1 copied its payload. The
    offline install-stage1 snapshot preserves that disk. Continue from the
    macOS Installer entry on the target, not the original media entry.
-   Diagnose the WHPX XSAVE/warm-reset failure and XNU clock calibration.
+   Warm reset is fixed and verified with guest-requested reboots in the
+   same process. Resolve the user-space IMG4 board/manifest mismatch at
+   system-volume sealing and investigate XNU clock calibration. Preserve
+   existing checkpoints when changing Secure Boot personalization, and
+   restore RELEASE OpenCore after DEBUG diagnostics.
    Use the account
    and region supplied by the owner; keep passwords out of source files,
    command lines and logs.

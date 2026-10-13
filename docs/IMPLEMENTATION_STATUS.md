@@ -78,10 +78,15 @@ The accompanying Apple license must be considered; see
 windows-vm.md and windows-native-audit.md.
 
 The user accepted the installer agreement. Stage 1 copied about 17.76 GiB
-and restarted, exposing a WHPX XSAVE/warm-reset failure. Its disk was saved
-in the offline install-stage1 snapshot and a fresh QEMU process reached the
-target's macOS Installer entry. Stage 2 is continuing. An XNU/hypervisor
-clock-frequency discrepancy is being investigated separately.
+and restarted, exposing a WHPX XSAVE/warm-reset failure. Native XSAVE
+buffer negotiation and reset of extended, interrupt and MTRR state now
+allow both QMP and installer-requested reboots in the same process. Disk
+checkpoints preserve stages 1 and 2. Sealing still fails MSU 1130: user-space
+IMG4 selects VM board f0 against a j185 manifest with board 22. The kernel
+ForceSecureBootScheme patch is confirmed applied but does not resolve that
+user-space mismatch. A DEBUG OpenCore image is used only for diagnosis;
+restore the validated RELEASE image after the investigation. An
+XNU/hypervisor clock-frequency discrepancy remains unresolved.
 
 Completed installation, desktop/reboot, guest Metal, Liquid Glass
 and workload FPS

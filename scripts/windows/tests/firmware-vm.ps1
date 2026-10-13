@@ -192,6 +192,11 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $restored
     Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -WithoutInstaller } 'Launch settings changed'
     Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -Headless } 'Launch settings changed'
+    & (Join-Path $testScripts 'start.ps1') -Qemu $python -Paused | Out-Null
+    Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').status -eq 'prelaunch') 'Paused power-on resets without running CPUs'
+    Invoke-ReimsQmp $runtime 'cont' | Out-Null
+    & (Join-Path $testScripts 'stop.ps1') -TimeoutSeconds 2 | Out-Null
+    Write-ReimsJson (Join-Path $runtime.run_directory 'command.json') @{ executable = $python; arguments = @($launchArguments) + '-S'; headless = $false }
     & (Join-Path $testScripts 'start.ps1') -Qemu $python | Out-Null
     Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').running -and (Get-ReimsVmProcess $runtime).Id -eq $mock.Id) 'Start resets and powers on the same process'
     Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python } 'VM is running'
@@ -227,6 +232,8 @@ apple = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 assert c['NVRAM']['Add'][apple]['csr-active-config'] == bytes(4)
 assert 'amfi' not in c['NVRAM']['Add'][apple]['boot-args'].lower()
 assert c['Misc']['Security']['DmgLoading'] == 'Signed'
+assert c['Misc']['Security']['SecureBootModel'] == 'j185'
+assert c['Kernel']['Quirks']['ForceSecureBootScheme'], 'j185 VMs require the x86 IMG4 scheme'
 drivers = {d['Path']: d['Enabled'] for d in c['UEFI']['Drivers']}
 assert drivers.get('OpenPartitionDxe.efi'), 'APM installers require the partition driver'
 assert drivers.get('OpenHfsPlus.efi'), 'HFS+ installers require the filesystem driver'
