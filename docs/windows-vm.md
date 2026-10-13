@@ -10,6 +10,67 @@ not prove a Windows guest boot or Vulkan rendering works. A normal start
 requires an enabled Windows Hypervisor Platform and a running hypervisor;
 there is no automatic TCG fallback.
 
+## Fluent Windows manager
+
+`build/windows-manager/ReimsManager.exe` uses WPF's built-in Windows Fluent
+theme and follows the system light/dark setting. Keep the whole published
+folder: it contains the .NET runtime and the PowerShell backend. The app
+selects a project folder, then manages its existing `vm/state` configuration.
+It does not create a second set of disks behind the CLI's back.
+
+Build it with a Windows .NET 10 SDK:
+
+```powershell
+./scripts/windows/build-manager.ps1 -Dotnet <path-to-dotnet.exe> -SelfTest
+```
+
+The setup tab selects an ISO, prepares a sparse disk and validated OpenCore,
+and generates a private machine identity once. Existing disks and NVRAM are
+retained. The hardware page edits CPU cores, RAM, installer attachment,
+NAT/TAP networking, audio and display resolution. Disk expansion creates a
+larger child overlay, preserving the previous disk; grow the APFS partition
+inside macOS afterwards. Disks are never shrunk.
+
+Power-off retains QEMU; Start resets and powers on that same process with
+unchanged launch settings. Complete Exit waits for macOS to shut down and
+then closes QEMU, allowing offline settings and snapshots. Restart asks
+macOS to reboot. Pause/Resume use QMP. The explicit force-exit action warns
+that unsaved guest work is lost. Closing the manager itself leaves the VM
+running.
+
+After installing macOS, open `REIMSTOOLS` in Finder and run `setup.command`.
+It installs the host's SSH public key, enables the built-in SSH service, sets
+Japanese keyboard/timezone preferences and the measured Metal preference,
+and permits only the exact shutdown/restart commands through passwordless
+sudo. The guest password is entered in macOS and is never stored by the
+manager. Enter the displayed SHA256 host-key fingerprint and guest user in
+the connection tab. Pairing rejects a different fingerprint. `REIMSTOOLS`
+is a generated SATA FAT disk under a disposable overlay; it contains only
+authored scripts and the public key, not guest or Apple binaries.
+
+NAT is the default and forwards SSH only on loopback. Bridge mode passes an
+existing TAP-Windows adapter name to QEMU and uses the guest's LAN address
+for SSH, with the same pinned host key. Wintun and VMware adapters cannot
+substitute for a TAP device. The bridge-preparation page installs a locally
+selected, valid OpenVPN-signed TAP installer and calls Windows `netsh bridge
+create` for the explicitly selected TAP and physical adapter. Those two
+host operations request Windows elevation. Bridge creation can change the
+host's address and briefly interrupt networking. No TAP driver or physical
+bridge is silently installed when NAT is selected.
+
+The display offers 720p, 1080p, 1440p and 4K at 60 Hz. macOS may restore its
+own saved mode after boot. The live resolution action applies and saves a
+Core Graphics display configuration through pinned SSH, so the mode does
+not revert when the helper exits. 1080p is the default; a successfully
+advertised 4K mode is not a performance guarantee.
+
+`prepare-opencore.ps1 -GenerateIdentity -Rebuild` uses the official release's
+macserial for a new serial/MLB pair, takes ROM from this VM's unicast MAC,
+and preserves the installed SystemUUID and Mac model. Values and backups
+remain in ignored private state. Repeated setup retains this identity.
+This prepares SMBIOS; only an actual sign-in can establish that Apple
+Account services accept it. The app does not collect Apple credentials.
+
 ## Licensing
 
 Bring your own legitimately obtained installer and read the license that
@@ -308,5 +369,18 @@ start; adding OpenPartitionDxe makes the APM/HFS+ installer visible. CLI
 input starts the Tahoe booter, which verifies the j185 kernel collection
 and boots the recovery UI. The core/thread count MSR must reflect eight
 CPUs, rather than leaving XNU's one-CPU fallback. The new target was formatted
-as GPT/APFS and recovery reports 26.4/25E246 with SIP enabled. Installation,
-guest Metal and the desktop remain unverified.
+as GPT/APFS and recovery reports 26.4/25E246 with SIP enabled.
+
+On 2026-10-13, RELEASE OpenCore with `x86legacy` completed sealing and
+booted the installed 26.4 desktop. Finder, Dock, Safari and Settings drew
+successfully. The guest reported the Apple Paravirtualized Graphics Device
+and Metal 2. A 3840x2160 framebuffer with a 1920x1080 logical desktop was
+observed, but interaction slowed at 4K and the working default was restored
+to 1080p. These observations do not establish a 60 FPS workload.
+
+The window's 92 tests, the native HID report checks and the Windows
+management/overlay checks passed. The full check's formatting, clippy,
+header and doctest stages ran, but its test run remains incomplete on
+Windows: the unchanged C integration harness includes `sys/mman.h`. It is
+not reported as a green full suite. Bridge networking still needs a host
+with a configured TAP bridge for physical-network validation.

@@ -1459,3 +1459,43 @@ sealing and bless, and rebooted to the installed Reims boot entry. OpenCore's
 guest firmware Shutdown followed by CLI start powered off/on in the same PID.
 SIP, AMFI and signed-DMG policy were retained. First boot and full desktop
 validation remain separate checks.
+
+The installed Tahoe 26.4 desktop initially showed only wallpaper and
+repeated iconservices aborts in Metal's binary-archive loading path. The
+measured `METAL_ERROR_MODE=5` preference in
+`/Library/Preferences/.GlobalPreferences.plist` must be readable by the
+logged-in user. With root-only mode 0600 it had no effect for that user;
+root:wheel mode 0644 made NSUserDefaults read 5 and the Dock, Finder icons
+and application windows draw without those repeated aborts. SIP and AMFI
+remained enabled. This observation concerns that failure, not every Metal
+workload.
+
+Windows guest inspection and power control now use a local SSH key with a
+pinned host key. The narrow sudo rule allows only `shutdown -h now` and
+`shutdown -r now`. Native guest shutdown was observed reaching QMP's
+`shutdown` state before complete process exit. A generated tools volume
+on SATA enumerates as FAT16 `REIMSTOOLS`; the default full-speed USB storage
+device behind the emulated hub did not enumerate as a disk in this guest.
+
+`CGDisplaySetDisplayMode` alone applied a mode only while its caller was
+alive. The manager uses a display-configuration transaction with permanent
+scope, then checks the resulting pixel dimensions. A separate process
+confirmed the restored 1920x1080 mode after the helper exited. The guest
+still reports a 6.4 GHz TSC while the host timer is about 3.18 GHz; this
+clock discrepancy remains unresolved.
+
+On the tested Windows Apple JIS keyboard, Eisu/Kana reached a foreground
+message probe as virtual keys 0x1a/0x16 with scancodes 0xf1/0xf2. The Raw
+Input packets instead carried break flags on press and E1 on release.
+The window consumes those language-key messages only for its focused SDL
+window and queues USB LANG2/LANG1 events, including release and repeat state.
+QEMU also needs the missing Hanja/Hangul-to-LANG2/LANG1 HID table entries.
+The USB keyboard report's logical maximum is encoded as a positive
+two-byte 255: with one-byte 0xff, the macOS guest did not accept JIS usages
+above 0x7f. After that descriptor change the physical Ro/underscore key
+worked. The descriptor lengths for both USB speeds change together.
+After installing the focused-window message handler, physical Eisu and Kana
+were confirmed switching the guest between ABC and Japanese input. QMP
+delivery of the same two keys also changed the current Carbon input source
+to the expected identifiers. Command and Ro/underscore were confirmed
+separately with the physical keyboard.
