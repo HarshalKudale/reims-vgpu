@@ -34,6 +34,10 @@ mod tests {
             "the ISO key right of left Shift"
         );
         assert_eq!(usb_usage(53), Some(0x35), "the key left of 1");
+        assert_eq!(usb_usage(0x91), Some(0x91), "JIS Eisu");
+        assert_eq!(usb_usage(0x90), Some(0x90), "JIS Kana");
+        assert_eq!(usb_usage(0x87), Some(0x87), "JIS Ro / underscore");
+        assert_eq!(usb_usage(0x89), Some(0x89), "JIS Yen");
         assert_eq!(usb_usage(224), Some(0xE0), "left Control");
         assert_eq!(
             usb_usage(227),

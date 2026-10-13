@@ -287,6 +287,13 @@ pub(crate) fn event(event: &SDL_Event) {
             event.window.windowID.0
         },
         k if k == SDL_EVENT_KEY_DOWN.0 || k == SDL_EVENT_KEY_UP.0 => unsafe {
+            #[cfg(windows)]
+            if std::env::var_os("REIMS_JIS_TRACE").is_some()
+                && matches!(event.key.scancode.0, 0x87 | 0x89..=0x94 | 0xe3 | 0xe7)
+            {
+                // Only JIS and Command positions; ordinary text is never logged.
+                log::info!(target: "reims_vgpu_window", "JIS input: raw={:#06x} usage={:#04x} down={} keyboard={}", event.key.raw, event.key.scancode.0, event.key.down, event.key.which.0);
+            }
             event.key.windowID.0
         },
         k if k == SDL_EVENT_MOUSE_MOTION.0 => unsafe { event.motion.windowID.0 },

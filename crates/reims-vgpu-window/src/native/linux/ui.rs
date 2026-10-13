@@ -13,6 +13,9 @@
 //! any other window), `reims-vgpu` the windows' application ID (the task bar's entry on Wayland),
 //! cursors given for the screen's scale ([`crate::sdl::cursor`]), and no quit event when the last
 //! window closes, as the windows' end is the display's.
+//! On Windows, SDL's message path normalizes the high bit of Japanese language
+//! scancodes. An Apple JIS keyboard reported Raw Input make codes 0x71/0x72 with
+//! break flags even on press, and E1 on release; SDL's raw path drops those keys.
 //!
 //! Where SDL's video does not start (no Wayland compositor and no X server to reach), the reason
 //! is logged once, no window opens, the work posted is dropped, and the host's screens are none:
@@ -149,13 +152,15 @@ pub(crate) fn screens() -> Vec<HostScreen> {
 
 /// Sets SDL's settings (the module doc).
 fn set_hints() {
-    let hints: [(&CStr, &CStr); 6] = [
+    let hints: &[(&CStr, &CStr)] = &[
         (c"SDL_NO_SIGNAL_HANDLERS", c"1"),
         (c"SDL_VIDEO_ALLOW_SCREENSAVER", c"1"),
         (c"SDL_APP_ID", c"reims-vgpu"),
         (c"SDL_MOUSE_DPI_SCALE_CURSORS", c"1"),
         (c"SDL_QUIT_ON_LAST_WINDOW_CLOSE", c"0"),
         (c"SDL_MOUSE_FOCUS_CLICKTHROUGH", c"1"),
+        #[cfg(windows)]
+        (c"SDL_WINDOWS_RAW_KEYBOARD", c"0"),
     ];
     for (name, value) in hints {
         // SAFETY: both are NUL-terminated strings SDL copies.
@@ -176,6 +181,8 @@ fn start_video() -> bool {
         );
         return false;
     }
+    #[cfg(windows)]
+    super::windows::install_message_hook();
     // SAFETY: SDL's video runs.
     let kind = unsafe { SDL_RegisterEvents(1) };
     WAKE.store(kind, Ordering::Release);

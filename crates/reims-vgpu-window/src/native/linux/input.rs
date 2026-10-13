@@ -47,6 +47,9 @@ use crate::scroll::POINTS_PER_LINE;
 pub(crate) const FOCUS_CLICK_NS: u64 = 100_000_000;
 
 /// What the title ends with while captured: what capture is on and how to release it.
+#[cfg(windows)]
+const CAPTURED_SUFFIX: &str = " \u{2014} input captured (press Ctrl+Alt+Win to release)";
+#[cfg(not(windows))]
 const CAPTURED_SUFFIX: &str = " \u{2014} input captured (press Ctrl+Alt+Super to release)";
 
 /// What the window knows when an event reaches it.
