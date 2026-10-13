@@ -50,11 +50,11 @@ c['DeviceProperties']['Add'] = {}
 c['DeviceProperties']['Delete'] = {}
 c['Booter']['Quirks'].update(EnableWriteUnprotector=False, RebuildAppleMemoryMap=True, SyncRuntimePermissions=True)
 c['Kernel']['Emulate']['DummyPowerManagement'] = True
-c['Kernel']['Quirks'].update(AppleXcpmExtraMsrs=True, DisableLinkeditJettison=False, ForceSecureBootScheme=True)
+c['Kernel']['Quirks'].update(AppleXcpmExtraMsrs=True, DisableLinkeditJettison=False, ForceSecureBootScheme=False)
 c['Misc']['Boot'].update(HideAuxiliary=False, Timeout=0)
 c['Misc']['Debug'].update(AppleDebug=True, ApplePanic=True, DisplayLevel=0x80000042, Target=75)
 c['Misc']['Serial']['Init'] = True
-c['Misc']['Security'].update(ScanPolicy=0, SecureBootModel='j185', DmgLoading='Signed', Vault='Optional')
+c['Misc']['Security'].update(ScanPolicy=0, SecureBootModel='x86legacy', DmgLoading='Signed', Vault='Optional')
 apple = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 c['NVRAM']['Add'][apple] = {'boot-args': '-v keepsyms=1 serial=3 debug=0x108', 'csr-active-config': bytes(4),
                           'prev-lang:kbd': b'en:252', 'run-efi-updater': 'No'}

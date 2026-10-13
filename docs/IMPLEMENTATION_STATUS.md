@@ -41,7 +41,7 @@ SHA-256 are private in vm/state/media.json.
 
 OpenCore 1.0.8 is from its official release and passes ocvalidate. The FAT
 EFI image, matched QEMU OVMF pair, native-built Reims option ROM and 128 GiB
-sparse qcow2 overlay chain are prepared. iMac20,1/j185 is configured; CSR is
+sparse qcow2 overlay chain are prepared. iMac20,1/x86legacy is configured; CSR is
 zero, signed DMG loading is required, and no AMFI disabling argument is set.
 Sample identity values do not provision Apple online services.
 
@@ -81,12 +81,16 @@ The user accepted the installer agreement. Stage 1 copied about 17.76 GiB
 and restarted, exposing a WHPX XSAVE/warm-reset failure. Native XSAVE
 buffer negotiation and reset of extended, interrupt and MTRR state now
 allow both QMP and installer-requested reboots in the same process. Disk
-checkpoints preserve stages 1 and 2. Sealing still fails MSU 1130: user-space
-IMG4 selects VM board f0 against a j185 manifest with board 22. The kernel
-ForceSecureBootScheme patch is confirmed applied but does not resolve that
-user-space mismatch. A DEBUG OpenCore image is used only for diagnosis;
-restore the validated RELEASE image after the investigation. An
-XNU/hypervisor clock-frequency discrepancy remains unresolved.
+checkpoints preserve stages 1 and 2. Sealing initially failed MSU 1130:
+user-space IMG4 selected VM board f0 against a j185 manifest with board 22.
+The kernel ForceSecureBootScheme patch was confirmed applied but did not
+resolve that user-space mismatch. RELEASE OpenCore is restored, and the
+VM's documented x86legacy model passes board and digest verification.
+Sealing and bless finished successfully, and an automatic restart exposed
+the Reims boot entry. An offline install-sealed-x86legacy checkpoint
+preserves that state. OpenCore's guest Shutdown and CLI start also powered
+off/on in the same QEMU process. The XNU/hypervisor clock-frequency discrepancy
+remains unresolved.
 
 Completed installation, desktop/reboot, guest Metal, Liquid Glass
 and workload FPS

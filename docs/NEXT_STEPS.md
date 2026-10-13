@@ -11,10 +11,11 @@
    offline install-stage1 snapshot preserves that disk. Continue from the
    macOS Installer entry on the target, not the original media entry.
    Warm reset is fixed and verified with guest-requested reboots in the
-   same process. Resolve the user-space IMG4 board/manifest mismatch at
-   system-volume sealing and investigate XNU clock calibration. Preserve
-   existing checkpoints when changing Secure Boot personalization, and
-   restore RELEASE OpenCore after DEBUG diagnostics.
+   same process. RELEASE OpenCore with x86legacy passes the user-space IMG4
+   board/digest checks that j185 failed, completes sealing and bless, and
+   exposes the Reims boot entry. The install-sealed-x86legacy snapshot
+   preserves it. Boot Reims and investigate XNU clock calibration. Preserve existing checkpoints when
+   changing Secure Boot personalization.
    Use the account
    and region supplied by the owner; keep passwords out of source files,
    command lines and logs.

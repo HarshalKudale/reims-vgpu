@@ -1443,3 +1443,19 @@ unhandled MSR_CORE_THREAD_COUNT read. WHPX must return the same configured
 topology helper that TCG, KVM and HVF already use. Keep native build, paused
 realization and cold guest boot evidence separate from installer/desktop
 and GPU workload validation. CLI commands are in [windows-vm.md](windows-vm.md).
+
+On 2026-10-13, native XSAVE buffer negotiation and reset of extended,
+interrupt and MTRR state allowed QMP reset and installer-requested reboot
+to return to OpenCore in the same WHPX process. Stale fixed-range MTRRs
+caused an OVMF assertion on warm boot, even after cold boots passed.
+
+The j185 configuration passed the recovery booter's authentication but
+failed user-space IMG4 checks during system-volume sealing: its board-22
+manifest did not match the software verifier's board f0. DEBUG OpenCore
+confirmed its kernel ForceSecureBootScheme patch applied; that did not
+change the user-space result. Restoring RELEASE OpenCore with x86legacy
+selected a matching manifest, passed board and digest verification, completed
+sealing and bless, and rebooted to the installed Reims boot entry. OpenCore's
+guest firmware Shutdown followed by CLI start powered off/on in the same PID.
+SIP, AMFI and signed-DMG policy were retained. First boot and full desktop
+validation remain separate checks.

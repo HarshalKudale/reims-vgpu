@@ -79,9 +79,20 @@ same release's Windows `ocvalidate.exe`. Once cached, it needs no network.
 It uses `OpenRuntime.efi`, `OpenPartitionDxe.efi` for Apple partition maps,
 and the open source `OpenHfsPlus.efi`, with no
 Apple firmware or kext binaries added. The built-in picker, iMac20,1 model,
-j185 Apple Secure Boot model and signed DMG loading are configured; CSR is
+x86legacy Apple Secure Boot model and signed DMG loading are configured; CSR is
 zero, and no AMFI disabling boot arguments are set. Sample serial/MLB values
 are placeholders; this setup does not provision Apple online services.
+
+OpenCore documents `x86legacy` for VMs. On the measured Tahoe 26.4 installer,
+`j185` booted recovery but selected a board-22 sealing manifest, while the
+user-space software verifier required board f0. Its kernel-only
+`ForceSecureBootScheme` quirk did not fix that mismatch. `x86legacy` selected
+the matching manifest and passed board and digest verification. Existing
+plists are preserved: change `Misc/Security/SecureBootModel` to `x86legacy`
+and `Kernel/Quirks/ForceSecureBootScheme` to false while QEMU is exited, then
+run preparation with `-Rebuild`. Preserve disk and firmware checkpoints when
+changing personalization. See the
+[OpenCore manual](https://github.com/acidanthera/OpenCorePkg/blob/1.0.8/Docs/Configuration.tex).
 
 Native `qemu-img convert -f vvfat` makes a sparse FAT16 image from the EFI
 directory, then its MBR partition type is marked as an EFI System Partition.
@@ -160,12 +171,11 @@ kernel diagnostics are enabled without relaxing SIP or AMFI. After boot,
 recovery reports SIP enabled; OpenCore's temporary booter CSR bit for slide
 selection is restored before XNU receives it.
 
-The `j185` VM enables `Kernel/Quirks/ForceSecureBootScheme`, as required by
-the [OpenCore manual](https://raw.githubusercontent.com/acidanthera/OpenCorePkg/1.0.8/Docs/Configuration.tex)
-for a VM using a SecureBootModel other than `x86legacy`. It selects x86 IMG4
-verification to match the emulated board, retaining `j185`, signed DMG
-loading, CSR zero and AMFI. Without it, the installer rejected the board
-binding (`0x22` in its manifest, `0xf0` in the VMM scheme) with MSU 1130.
+The current VM uses `x86legacy`, with ForceSecureBootScheme false. Its
+software IMG4 scheme matches the installer manifest. The earlier j185
+experiment confirmed that the kernel quirk alone does not change the
+user-space sealing verifier; its MSU 1130 failure was resolved by selecting
+the VM model, with signature verification still enforced.
 
 Its `-L` path points to the pinned QEMU source's `pc-bios`, so relocating the
 executable does not lose its network/virtual APIC option ROMs.

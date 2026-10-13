@@ -7,11 +7,13 @@
 - WHPX warm reset now negotiates the native XSAVE buffer size and resets
   extended, interrupt and MTRR state. QMP reset and an installer-requested
   reboot returned to OpenCore in the same process. Retained-process power
-  cycles pass the QMP fixture; actual guest power-off/on still needs proof.
-- Installation reaches system-volume sealing, then fails MSU 1130. The
-  user-space IMG4 verifier selects VM board f0, while the j185 manifest
-  specifies board 22. DEBUG OpenCore confirms ForceSecureBootScheme was
-  applied to the kernel, but that alone does not fix user-space verification.
+  cycles pass the QMP fixture and OpenCore guest firmware power-off/on.
+  Installed-macOS power-off/on still needs proof.
+- The j185 configuration failed sealing with MSU 1130: its manifest board
+  22 disagreed with the user-space VM verifier's board f0. Kernel
+  ForceSecureBootScheme alone did not resolve it. RELEASE OpenCore with
+  x86legacy passes board/digest verification, completes sealing and bless,
+  and exposes the installed Reims boot entry after automatic restart.
   SIP/AMFI and signed-DMG policy remain enabled.
 - A discarded per-vCPU delete/recreate reset experiment preceded a host
   HYPERVISOR_ERROR bugcheck. It is excluded from the current source. The

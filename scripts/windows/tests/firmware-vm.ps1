@@ -232,8 +232,8 @@ apple = '7C436110-AB2A-4BBB-A880-FE41995C9F82'
 assert c['NVRAM']['Add'][apple]['csr-active-config'] == bytes(4)
 assert 'amfi' not in c['NVRAM']['Add'][apple]['boot-args'].lower()
 assert c['Misc']['Security']['DmgLoading'] == 'Signed'
-assert c['Misc']['Security']['SecureBootModel'] == 'j185'
-assert c['Kernel']['Quirks']['ForceSecureBootScheme'], 'j185 VMs require the x86 IMG4 scheme'
+assert c['Misc']['Security']['SecureBootModel'] == 'x86legacy', 'VM IMG4 identity must match the software verifier'
+assert not c['Kernel']['Quirks']['ForceSecureBootScheme'], 'x86legacy uses the native VM IMG4 scheme'
 drivers = {d['Path']: d['Enabled'] for d in c['UEFI']['Drivers']}
 assert drivers.get('OpenPartitionDxe.efi'), 'APM installers require the partition driver'
 assert drivers.get('OpenHfsPlus.efi'), 'HFS+ installers require the filesystem driver'

@@ -28,7 +28,8 @@
 | Recovery shutdown | Guest Terminal command passed; QMP powerdown timed out |
 | Installation stage 1 | Copied about 17.76 GiB and requested restart |
 | WHPX warm restart | Native XSAVE/MTRR regressions passed; QMP reset and installer-requested reboot returned to OpenCore in the same process |
-| Installation sealing | Failed MSU 1130: user-space IMG4 board f0 disagrees with j185 manifest board 22; kernel ForceSecureBootScheme alone did not resolve it |
+| Installation sealing | x86legacy passed board/digest verification, sealing and bless; guest reported success and rebooted to the Reims entry |
+| Retained process power-off/on | OpenCore guest Shutdown reached QMP shutdown; CLI start resumed the same PID |
 | Guest clock calibration | XNU 6.4 GHz disagrees with hypervisor/native host about 3.187 GHz |
 | Installed Tahoe/guest Metal/Liquid Glass/workload FPS | Pending installation |
 
