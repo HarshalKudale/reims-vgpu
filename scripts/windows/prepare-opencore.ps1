@@ -4,10 +4,12 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '1.0.8',
     [string]$QemuImg,
     [string]$FirmwareDirectory,
+    [switch]$GenerateIdentity,
     [switch]$Rebuild
 )
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 Assert-ReimsVmStopped
+if ($GenerateIdentity -and !$Rebuild) { throw 'Use -GenerateIdentity with -Rebuild.' }
 $downloads = Join-Path $ProjectRoot '.work/downloads'
 $releasePath = Join-Path $downloads "OpenCore-$Version-release.json"
 if (!(Test-Path -LiteralPath $releasePath)) {
@@ -73,6 +75,38 @@ target.write_bytes(plistlib.dumps(c, sort_keys=False))
 '@
     $script | & $python - (Join-Path $package 'Docs/Sample.plist') $plist
     if ($LASTEXITCODE -ne 0) { throw 'OpenCore configuration generation failed.' }
+}
+if ($GenerateIdentity) {
+    $vmConfig = Get-ReimsVmConfig
+    $pairs = (Invoke-ReimsTool (Join-Path $package 'Utilities/macserial/macserial.exe') @('-m', 'iMac20,1', '-n', '1')) -join "`n"
+    $match = [regex]::Match($pairs, '^([A-Z0-9]{12})\s*\|\s*([A-Z0-9]{17})$', [Text.RegularExpressions.RegexOptions]::Multiline)
+    if (!$match.Success) { throw 'macserial did not return a serial/MLB pair.' }
+    $identityPath = Join-Path $ProjectRoot 'vm/state/opencore-identity.json'
+    Write-ReimsJson $identityPath @{
+        model = 'iMac20,1'; serial = $match.Groups[1].Value
+        mlb = $match.Groups[2].Value; mac = $vmConfig.mac
+    }
+    $backup = Join-Path $ProjectRoot ('.work/diagnostics/opencore-before-identity-' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff') + '.plist')
+    Copy-Item -LiteralPath $plist -Destination $backup
+    $script = @'
+import json, pathlib, plistlib, sys, uuid
+p, manifest = map(pathlib.Path, sys.argv[1:])
+c = plistlib.loads(p.read_bytes())
+i = json.loads(manifest.read_text(encoding='utf-8-sig'))
+g = c['PlatformInfo']['Generic']
+assert g['SystemProductName'] == i['model'], 'Keep the installed Mac model'
+uuid.UUID(g['SystemUUID'])
+rom = bytes.fromhex(i['mac'].replace(':', ''))
+assert len(rom) == 6 and not rom[0] & 1, 'ROM must be a unicast VM MAC'
+g.update(SystemSerialNumber=i['serial'], MLB=i['mlb'], ROM=rom)
+c['PlatformInfo'].update(Automatic=True, UpdateDataHub=True, UpdateNVRAM=True, UpdateSMBIOS=True)
+i.update(uuid=g['SystemUUID'], rom=rom.hex())
+p.write_bytes(plistlib.dumps(c, sort_keys=False))
+manifest.write_text(json.dumps(i, indent=2) + '\n', encoding='utf-8')
+'@
+    $script | & $python - $plist $identityPath
+    if ($LASTEXITCODE -ne 0) { throw 'OpenCore identity update failed; the previous plist is saved in diagnostics.' }
+    "Generated a VM-specific identity; preserved SystemUUID. Backup: $backup"
 }
 $validate = Join-Path $package 'Utilities/ocvalidate/ocvalidate.exe'
 $validation = Invoke-ReimsTool $validate @($plist)

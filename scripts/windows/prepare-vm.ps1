@@ -6,6 +6,7 @@ param(
     [string]$QemuImg,
     [switch]$InspectOnly,
     [switch]$HashIso,
+    [ValidateRange(64,2048)][int]$DiskGiB = 128,
     [ValidateRange(1024, 65535)][int]$QmpPort = 4444,
     [ValidateRange(1024, 65535)][int]$SshPort = 2222
 )
@@ -92,9 +93,9 @@ $disks = Join-Path $ProjectRoot 'vm/disks'
 New-Item -ItemType Directory -Force -Path $disks | Out-Null
 $baseDisk = Join-Path $disks 'base.qcow2'
 $activeDisk = Join-Path $disks 'current.qcow2'
-if (!(Test-Path -LiteralPath $baseDisk)) { Invoke-ReimsTool $QemuImg @('create', '-f', 'qcow2', $baseDisk, '128G') | Out-Null }
+if (!(Test-Path -LiteralPath $baseDisk)) { Invoke-ReimsTool $QemuImg @('create', '-f', 'qcow2', $baseDisk, "$($DiskGiB)G") | Out-Null }
 $info = (Invoke-ReimsTool $QemuImg @('info', '--output=json', $baseDisk)) -join "`n" | ConvertFrom-Json
-if ($info.format -ne 'qcow2' -or $info.'virtual-size' -ne 128GB -or $info.PSObject.Properties['backing-filename']) { throw 'Existing base disk is not an independent 128 GiB qcow2 image.' }
+if ($info.format -ne 'qcow2' -or $info.'virtual-size' -ne [long]$DiskGiB * 1GB -or $info.PSObject.Properties['backing-filename']) { throw "Existing base disk is not an independent $DiskGiB GiB qcow2 image." }
 if (!(Test-Path -LiteralPath $activeDisk)) {
     Invoke-ReimsTool $QemuImg @('create', '-f', 'qcow2', '-F', 'qcow2', '-b', $baseDisk, $activeDisk) | Out-Null
 }
@@ -107,7 +108,7 @@ $vars = Join-Path $ProjectRoot 'vm/firmware/OVMF_VARS.fd'
 if (!(Test-Path -LiteralPath $vars)) { Copy-Item -LiteralPath $oc.firmware_vars_template -Destination $vars }
 $random = [Security.Cryptography.RandomNumberGenerator]::GetBytes(3)
 $config = [ordered]@{
-    schema = 1; cpus = 8; memory_mib = 8192; resolution = '1920x1080'; disk_gib = 128
+    schema = 1; cpus = 8; memory_mib = 8192; resolution = '1920x1080'; disk_gib = $DiskGiB
     cpu = 'Haswell-noTSX,stepping=3,vendor=GenuineIntel,+ssse3,+sse4.2,+popcnt,+avx,+avx2,+aes,+xsave,+xsaveopt,-arat,enforce'
     mac = '52:54:00:' + (($random | ForEach-Object { $_.ToString('x2') }) -join ':')
     qmp_port = $QmpPort; ssh_port = $SshPort; iso = $Iso; media_kind = $media.media_kind

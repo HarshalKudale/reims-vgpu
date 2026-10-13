@@ -109,6 +109,28 @@ function Invoke-ReimsQmp($Runtime, [string]$Command, [hashtable]$Arguments = @{}
 
 function ConvertTo-ReimsQemuPath([string]$Path) { return $Path.Replace('\', '/').Replace(',', ',,') }
 
+function Get-ReimsNetworkMode($Config) {
+    if ($Config.PSObject.Properties['network']) { return $Config.network.mode }
+    return 'nat'
+}
+
+function Get-ReimsNetworkArgument($Config) {
+    switch (Get-ReimsNetworkMode $Config) {
+        nat { return "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$($Config.ssh_port)-:22" }
+        bridge {
+            $name = $Config.network.adapter
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -match '[\r\n]') { throw 'Select a TAP adapter.' }
+            return 'tap,id=net0,ifname=' + $name.Replace(',', ',,')
+        }
+        default { throw 'Unknown network mode.' }
+    }
+}
+
+function Get-ReimsTapAdapters {
+    # QEMU opens an Ethernet TAP device; Wintun is an IP tunnel and cannot substitute.
+    return @(Get-NetAdapter -ErrorAction Stop | Where-Object InterfaceDescription -Match 'TAP-Windows|TAP-Win32|TAP.*Adapter')
+}
+
 function ConvertTo-ReimsWindowsArgument([string]$Value) {
     $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
     $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
@@ -131,8 +153,14 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
     $vars = ConvertTo-ReimsQemuPath $Config.firmware_vars
     $oc = ConvertTo-ReimsQemuPath $Config.opencore
     $disk = ConvertTo-ReimsQemuPath $Config.active_disk
-    $rom = ConvertTo-ReimsQemuPath $Config.rom
     $serial = ConvertTo-ReimsQemuPath (Join-Path $RunDirectory 'serial.log')
+    $audio = if ($Config.PSObject.Properties['audio']) { $Config.audio } else { 'none' }
+    if ($audio -notin @('none','dsound')) { throw 'Unknown Windows audio backend.' }
+    $gfx = [ordered]@{
+        driver = 'apple-gfx-pci'; id = 'gfx'; bus = 'pcie.0'; addr = '0x4'
+        displays = 1; resolution = $Config.resolution; romfile = $Config.rom.Replace('\', '/')
+        'display-modes' = @("$($Config.resolution)@60", '1280x720@60', '1920x1080@60', '2560x1440@60', '3840x2160@60') | Select-Object -Unique
+    }
     $qemuArguments = @(
         '-L', (ConvertTo-ReimsQemuPath (Join-Path $ProjectRoot 'vendor/qemu/pc-bios')),
         '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx' }),
@@ -147,12 +175,12 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         '-device', 'ide-hd,bus=sata.2,drive=opencore,bootindex=1',
         '-drive', "id=disk,if=none,format=qcow2,file=$disk",
         '-device', 'ide-hd,bus=sata.3,drive=disk,rotation_rate=1',
-        '-netdev', "user,id=net0,ipv6=off,hostfwd=tcp:127.0.0.1:$($Config.ssh_port)-:22",
+        '-netdev', (Get-ReimsNetworkArgument $Config),
         '-device', "virtio-net-pci,netdev=net0,id=net0,mac=$($Config.mac),addr=0x3", '-vga', 'none',
-        '-device', "apple-gfx-pci,id=gfx,bus=pcie.0,addr=0x4,displays=1,resolution=$($Config.resolution),romfile=$rom",
+        '-device', (ConvertTo-Json -InputObject $gfx -Depth 4 -Compress),
         '-device', 'qemu-xhci,id=xhci,addr=0x5,conditional-intr-mapping=on',
         '-device', 'usb-kbd,id=kbd,bus=xhci.0', '-device', 'usb-tablet,id=tablet,bus=xhci.0',
-        '-audiodev', 'none,id=snd0', '-device', 'usb-audio,id=audio,audiodev=snd0,bus=xhci.0',
+        '-audiodev', "$audio,id=snd0", '-device', 'usb-audio,id=audio,audiodev=snd0,bus=xhci.0',
         '-display', 'none', '-monitor', 'none', '-serial', "file:$serial", '-msg', 'timestamp=on',
         '-qmp', "tcp:127.0.0.1:$($Config.qmp_port),server=on,wait=off"
     )
@@ -161,6 +189,11 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         $protection = if ($Config.media_kind -eq 'disk') { 'snapshot=on' } else { 'media=cdrom,readonly=on' }
         $qemuArguments += '-drive', "id=installer,if=none,format=raw,$protection,file=$media"
         $qemuArguments += '-device', $(if ($Config.media_kind -eq 'disk') { 'ide-hd,bus=sata.4,drive=installer' } else { 'ide-cd,bus=sata.4,drive=installer' })
+    }
+    $toolsImage = Join-Path $ProjectRoot 'vm/tools/ReimsTools.img'
+    if (Test-Path -LiteralPath $toolsImage) {
+        $qemuArguments += '-drive', ('id=tools,if=none,format=raw,snapshot=on,file=' + (ConvertTo-ReimsQemuPath $toolsImage))
+        $qemuArguments += '-device', 'ide-hd,id=tools,bus=sata.5,drive=tools'
     }
     if (!$DiagnosticTcg) { $qemuArguments += '-no-shutdown' }
     if ($Paused -or $DiagnosticTcg) { $qemuArguments += '-S' }
@@ -228,7 +261,12 @@ $accelerators = Invoke-ReimsTool $Qemu @('-accel', 'help')
 if (!$DiagnosticTcg -and 'whpx' -notin ($accelerators | ForEach-Object { $_.Trim() })) { throw 'This QEMU was not built with WHPX.' }
 $properties = Invoke-ReimsTool $Qemu @('-device', 'apple-gfx-pci,help')
 if (($properties -join "`n") -notmatch 'resolution') { throw 'This QEMU lacks the reims apple-gfx-pci ABI.' }
-foreach ($port in @($config.qmp_port, $config.ssh_port)) {
+if ((Get-ReimsNetworkMode $config) -eq 'bridge' -and $config.network.adapter -notin @(Get-ReimsTapAdapters | ForEach-Object Name)) {
+    throw 'The configured TAP adapter is missing. Install TAP-Windows6, create a Windows bridge, or switch to NAT.'
+}
+$ports = @($config.qmp_port)
+if ((Get-ReimsNetworkMode $config) -eq 'nat') { $ports += $config.ssh_port }
+foreach ($port in $ports) {
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, [int]$port)
     try { $listener.Start() } finally { $listener.Stop() }
 }

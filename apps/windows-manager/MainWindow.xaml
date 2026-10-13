@@ -1,0 +1,80 @@
+<Window x:Class="ReimsManager.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Reims Manager" Width="1120" Height="810" MinWidth="960" MinHeight="720"
+ WindowStartupLocation="CenterScreen" FontFamily="Yu Gothic UI, Segoe UI" FontSize="14">
+ <Grid Background="{DynamicResource ApplicationBackgroundBrush}">
+ <Grid Margin="24">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="130"/></Grid.RowDefinitions>
+  <StackPanel Margin="0,0,0,18">
+   <TextBlock Text="Reims Manager" FontSize="28" FontWeight="SemiBold" Margin="0,0,0,12"/>
+   <DockPanel><Button Content="フォルダーを選択" DockPanel.Dock="Right" Click="BrowseRoot"/><TextBox x:Name="Root" VerticalContentAlignment="Center"/></DockPanel>
+   <TextBlock x:Name="State" Text="状態を取得しています…" Margin="0,8,0,0"/>
+   <ProgressBar x:Name="Progress" Height="3" IsIndeterminate="True" Visibility="Collapsed" Margin="0,8,0,0"/>
+  </StackPanel>
+  <TabControl x:Name="Tabs" Grid.Row="1">
+   <TabItem Header="VM 操作"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
+    <TextBlock Text="macOS の電源と実行状態" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16"/>
+    <WrapPanel><Button Content="起動" Tag="Start" Click="ActionClick" IsDefault="True"/><Button Content="電源オフ" Tag="PowerOff" Click="ActionClick"/><Button Content="再起動" Tag="Restart" Click="ActionClick"/><Button Content="完全終了" Tag="Exit" Click="ActionClick"/></WrapPanel>
+    <WrapPanel><Button Content="一時停止" Tag="Pause" Click="ActionClick"/><Button Content="再開" Tag="Resume" Click="ActionClick"/><Button Content="状態を更新" Click="RefreshClick"/><Button Content="ログを収集" Tag="CollectLogs" Click="ActionClick"/></WrapPanel>
+    <CheckBox x:Name="ConnectIso" Content="インストーラーを接続して起動" Margin="0,8,0,16"/>
+    <TextBlock Text="電源オフ後も QEMU を保持し、次回起動で再利用します。設定変更とスナップショットの前には完全終了してください。" Margin="0,0,0,24"/>
+    <TextBlock Text="スナップショット" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,12"/>
+    <DockPanel Margin="0,0,0,8"><Button Content="保存" DockPanel.Dock="Right" Click="SaveSnapshot"/><TextBox x:Name="SnapshotName" ToolTip="スナップショット名"/></DockPanel>
+    <DockPanel><Button Content="復元…" DockPanel.Dock="Right" Click="RestoreSnapshot"/><ComboBox x:Name="Snapshots"/></DockPanel>
+    <Button Content="強制終了…" Click="ForceExit" HorizontalAlignment="Left" Margin="0,24,0,0"/>
+   </StackPanel></ScrollViewer></TabItem>
+   <TabItem Header="セットアップ"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
+    <TextBlock Text="ISO から macOS を準備" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16"/>
+    <WrapPanel><Button Content="仮想化エンジンを構築" Tag="BuildEngine" Click="ActionClick"/><Button Content="WHPX を有効化…" Click="EnableWhpx"/></WrapPanel>
+    <TextBlock Text="macOS インストーラー" Margin="0,0,0,8"/>
+    <DockPanel><Button Content="ISO を選択" DockPanel.Dock="Right" Click="BrowseIso"/><TextBox x:Name="Iso"/></DockPanel>
+    <TextBlock Text="新規ディスクの容量 (GiB)" Margin="0,12,0,8"/><TextBox x:Name="NewDiskSize" Text="128" Width="160" HorizontalAlignment="Left"/>
+    <Button Content="ディスクと OpenCore を準備" Click="Setup" HorizontalAlignment="Left" Margin="0,16,0,16"/>
+    <TextBlock Text="1. 準備後、インストーラー付きで起動します。&#10;2. macOS の Disk Utility で Reims の仮想ディスクを APFS に初期化し、インストールします。&#10;3. 初回設定後、Finder の REIMSTOOLS から setup.command を開きます。&#10;4. 表示された指紋を「macOS 接続」に入力します。"/>
+    <TextBlock Text="使用許諾・ユーザー作成・Apple Account の認証は macOS の画面で進めてください。既存のディスクは保持します。" Margin="0,20,0,0"/>
+   </StackPanel></ScrollViewer></TabItem>
+   <TabItem Header="仮想マシン設定"><Grid Margin="16">
+    <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="300"/><ColumnDefinition Width="20"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <ListBox x:Name="Devices" SelectionChanged="DeviceChanged">
+     <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem" BasedOn="{StaticResource DefaultListBoxItemStyle}"><Setter Property="Padding" Value="12,8"/></Style></ListBox.ItemContainerStyle>
+     <ListBoxItem>メモリ</ListBoxItem><ListBoxItem>プロセッサ</ListBoxItem><ListBoxItem>ハードディスク (SATA)</ListBoxItem><ListBoxItem>CD/DVD・ISO</ListBoxItem>
+     <ListBoxItem>ネットワークアダプター</ListBoxItem><ListBoxItem>USB コントローラー</ListBoxItem><ListBoxItem>サウンドカード</ListBoxItem><ListBoxItem>ディスプレイ</ListBoxItem>
+    </ListBox>
+    <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto"><Grid x:Name="Editors">
+     <StackPanel x:Name="MemoryPage"><TextBlock Text="メモリ" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="割り当てる容量 (MiB)" Margin="0,18,0,8"/><TextBox x:Name="Memory" Text="8192" Width="180" HorizontalAlignment="Left"/>
+      <Slider x:Name="MemorySlider" Minimum="4" Maximum="64" Value="8" TickFrequency="4" IsSnapToTickEnabled="False" ValueChanged="MemoryChanged" Margin="0,24,0,8"/><TextBlock Text="4 GiB　　　　　　　　　　　　　　　　　64 GiB"/><TextBlock Text="4 MiB 単位で指定できます。" Margin="0,24,0,0"/></StackPanel>
+     <StackPanel x:Name="CpuPage" Visibility="Collapsed"><TextBlock Text="プロセッサ" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="CPU コア数（1 ソケット）" Margin="0,18,0,8"/><TextBox x:Name="Cpus" Text="8" Width="180" HorizontalAlignment="Left"/><TextBlock Text="Windows Hypervisor Platform (WHPX)" Margin="0,24,0,0"/></StackPanel>
+     <StackPanel x:Name="DiskPage" Visibility="Collapsed"><TextBlock Text="ハードディスク" FontSize="22" FontWeight="SemiBold"/><TextBlock x:Name="DiskInfo" Margin="0,18,0,12"/><TextBlock Text="拡張後の容量 (GiB)" Margin="0,8,0,8"/><TextBox x:Name="DiskSize" Text="128" Width="180" HorizontalAlignment="Left"/><Button Content="ディスクを拡張…" Click="ExpandDisk" HorizontalAlignment="Left" Margin="0,16,0,8"/><TextBlock Text="以前のディスクを保持して新しい差分ディスクを拡張します。macOS の Disk Utility でも APFS 領域を拡張してください。"/></StackPanel>
+     <StackPanel x:Name="MediaPage" Visibility="Collapsed"><TextBlock Text="CD/DVD・ISO" FontSize="22" FontWeight="SemiBold"/><CheckBox x:Name="HardwareIso" Content="起動時にインストーラーを接続" Margin="0,18,0,16"/><TextBox x:Name="HardwareIsoPath"/><Button Content="ISO を選択" Click="BrowseHardwareIso" HorizontalAlignment="Left" Margin="0,16,0,8"/><TextBlock Text="元の ISO は書き換えません。"/></StackPanel>
+     <StackPanel x:Name="NetworkPage" Visibility="Collapsed"><TextBlock Text="ネットワークアダプター" FontSize="22" FontWeight="SemiBold"/><RadioButton x:Name="Nat" Content="NAT — ホストのインターネット接続を共有" IsChecked="True" Margin="0,18,0,12"/><RadioButton x:Name="Bridge" Content="ブリッジ — 物理ネットワークに接続" Margin="0,0,0,16"/><TextBlock Text="TAP アダプター" Margin="0,0,0,8"/><ComboBox x:Name="Tap"/><TextBlock Text="ブリッジ接続時の macOS IP / ホスト名" Margin="0,18,0,8"/><TextBox x:Name="GuestHost"/><Button Content="ブリッジの準備を開く" Click="OpenBridgeTab" HorizontalAlignment="Left" Margin="0,18,0,0"/></StackPanel>
+     <StackPanel x:Name="UsbPage" Visibility="Collapsed"><TextBlock Text="USB コントローラー" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="USB 3 (xHCI)&#10;キーボード・タブレット・USB サウンド" Margin="0,18,0,0"/><TextBlock Text="キーボード: macOS JIS&#10;英数・かな・Command・ろ / アンダースコア" Margin="0,24,0,0"/></StackPanel>
+     <StackPanel x:Name="AudioPage" Visibility="Collapsed"><TextBlock Text="サウンドカード" FontSize="22" FontWeight="SemiBold"/><CheckBox x:Name="Sound" Content="ホストの標準再生デバイスを使用" Margin="0,18,0,16"/><TextBlock Text="macOS には USB サウンドとして接続します。"/></StackPanel>
+     <StackPanel x:Name="DisplayPage" Visibility="Collapsed"><TextBlock Text="ディスプレイ" FontSize="22" FontWeight="SemiBold"/><TextBlock Text="解像度" Margin="0,18,0,8"/><ComboBox x:Name="Resolution"><ComboBoxItem>1280x720</ComboBoxItem><ComboBoxItem IsSelected="True">1920x1080</ComboBoxItem><ComboBoxItem>2560x1440</ComboBoxItem><ComboBoxItem>3840x2160</ComboBoxItem></ComboBox><Button Content="実行中の macOS に適用" Click="ApplyResolution" HorizontalAlignment="Left" Margin="0,18,0,0"/><TextBlock Text="実行中の切り替えには macOS 接続の設定が必要です。起動時の設定は下の「設定を保存」で保存します。" Margin="0,16,0,0"/><TextBlock Text="Apple Paravirtualized Graphics / Reims vGPU&#10;ホスト GPU の Vulkan で描画します。&#10;720p・1080p・1440p・4K を macOS に提供します。" Margin="0,24,0,0"/></StackPanel>
+    </Grid></ScrollViewer>
+    <DockPanel Grid.Row="1" Grid.ColumnSpan="3" Margin="0,18,0,0"><Button Content="設定を保存" DockPanel.Dock="Right" Click="SaveHardware"/><Button Content="変更を取り消す" DockPanel.Dock="Right" Click="ReloadHardware"/><TextBlock Text="設定の保存には VM の完全終了が必要です。" VerticalAlignment="Center"/></DockPanel>
+   </Grid></TabItem>
+   <TabItem Header="ブリッジの準備"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
+    <TextBlock Text="Windows のブリッジ接続" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16"/>
+    <TextBlock Text="TAP-Windows6 と物理アダプターを接続します。導入と接続作成には Windows の管理者権限が必要です。" Margin="0,0,0,18"/>
+    <WrapPanel><Button Content="公式 TAP ダウンロード" Click="TapDownload"/><Button Content="署名済み TAP を導入…" Click="InstallTap"/></WrapPanel>
+    <TextBlock Text="TAP アダプター" Margin="0,16,0,8"/><ComboBox x:Name="BridgeTap"/>
+    <TextBlock Text="接続する物理アダプター" Margin="0,16,0,8"/><ComboBox x:Name="Physical"/>
+    <Button Content="Windows ブリッジを作成…" Click="CreateBridge" HorizontalAlignment="Left" Margin="0,20,0,8"/>
+    <TextBlock Text="作成後、「仮想マシン設定」のネットワークをブリッジに切り替え、macOS の IP アドレスを入力して保存します。"/>
+   </StackPanel></ScrollViewer></TabItem>
+   <TabItem Header="macOS 接続"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20">
+    <TextBlock Text="macOS とペアリング" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,16"/>
+    <TextBlock Text="Finder の REIMSTOOLS から setup.command を開いてください。SSH 公開鍵・JIS 配列・描画設定・電源操作を準備します。" Margin="0,0,0,16"/>
+    <TextBlock Text="macOS ユーザー名" Margin="0,0,0,8"/><TextBox x:Name="GuestUser"/>
+    <TextBlock Text="setup.command が表示した SHA256 指紋" Margin="0,18,0,8"/><TextBox x:Name="Fingerprint"/>
+    <Button Content="指紋を照合して接続" Click="Pair" HorizontalAlignment="Left" Margin="0,18,0,18"/>
+    <TextBlock Text="macOS のパスワードは保存しません。SSH の秘密鍵はプロジェクト内に保持します。"/>
+    <TextBlock Text="OpenCore の識別情報" FontSize="20" FontWeight="SemiBold" Margin="0,28,0,12"/>
+    <TextBlock Text="SMBIOS は初回セットアップ時に生成し、以後は保持します。再生成しても SystemUUID は保持します。Apple Account へのサインインは macOS で行います。"/>
+    <Button Content="SMBIOS を再生成…" Click="GenerateIdentity" HorizontalAlignment="Left" Margin="0,18,0,0"/>
+   </StackPanel></ScrollViewer></TabItem>
+  </TabControl>
+  <TextBox x:Name="Log" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextWrapping="Wrap" Margin="0,16,0,0"/>
+ </Grid>
+ </Grid>
+</Window>

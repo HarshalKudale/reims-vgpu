@@ -70,7 +70,15 @@ try {
     Assert-Condition ($command[$command.IndexOf('-L') + 1] -eq (ConvertTo-ReimsQemuPath (Join-Path $testRoot 'vendor/qemu/pc-bios'))) 'ROM lookup is independent of the QEMU build directory'
     Assert-Condition (($command | Where-Object { $_ -like 'id=installer,*' }) -match 'snapshot=on') 'APM original is protected by an overlay'
     Assert-Condition (($command | Where-Object { $_ -like 'id=opencore,*' }) -match 'snapshot=on') 'OpenCore template is protected by an overlay'
-    Assert-Condition (($command -join ' ') -match 'apple-gfx-pci.*resolution=1920x1080') 'Actual GPU ABI and 1080p'
+    $gfx = ($command | Where-Object { $_.StartsWith('{') } | ConvertFrom-Json)
+    Assert-Condition ($gfx.driver -eq 'apple-gfx-pci' -and $gfx.resolution -eq '1920x1080' -and '3840x2160@60' -in $gfx.'display-modes') 'Actual GPU ABI, 1080p and offered 4K mode'
+    $bridgeConfig = $config.PSObject.Copy()
+    $bridgeConfig | Add-Member network @{mode='bridge';adapter='TAP, Japanese 日本語'}
+    $bridge = Get-ReimsQemuArguments $bridgeConfig $testRoot
+    Assert-Condition ($bridge[$bridge.IndexOf('-netdev') + 1] -eq 'tap,id=net0,ifname=TAP,, Japanese 日本語') 'Bridge selects the exact escaped TAP name'
+    Assert-Condition (($bridge -join ' ') -notmatch 'hostfwd') 'Bridge does not claim a NAT SSH forward'
+    $bridgeConfig.network.mode = 'invalid'
+    Assert-Throws { Get-ReimsQemuArguments $bridgeConfig $testRoot } 'Unknown network mode'
     Assert-Condition (($command -join ' ') -match 'tcp:127.0.0.1:4444' -and ($command -join ' ') -match 'hostfwd=tcp:127.0.0.1:2222') 'QMP and SSH stay on localhost'
     $diagnostic = Get-ReimsQemuArguments $config $testRoot -DiagnosticTcg
     Assert-Condition ('tcg' -in $diagnostic -and '-S' -in $diagnostic) 'Explicit TCG diagnostics remain paused'
@@ -123,6 +131,20 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     Assert-Condition ($echoProcess.ExitCode -eq 0) 'Native quoting fixture runs'
     $received = Get-Content -Raw -LiteralPath $echoOutput | ConvertFrom-Json
     Assert-Condition (($received | ConvertTo-Json -Compress) -eq ($values | ConvertTo-Json -Compress)) 'Windows quoting preserves every argument'
+
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -Cpus 4 -MemoryMiB 4096 -Resolution 2560x1440 -Audio dsound | Out-Null
+    $hardware = Get-ReimsVmConfig
+    Assert-Condition ($hardware.cpus -eq 4 -and $hardware.memory_mib -eq 4096 -and $hardware.audio -eq 'dsound' -and $hardware.resolution -eq '2560x1440') 'Hardware editor persists actual CPU, RAM, sound and resolution'
+    Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -MemoryMiB 4097 } '4 MiB'
+    Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetNetwork -Network bridge -Adapter 'not-a-real-adapter' } 'TAP-Windows'
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action ExpandDisk -DiskGiB 129 | Out-Null
+    $larger = Get-ReimsVmConfig
+    $largerInfo = (Invoke-ReimsTool $QemuImg @('info','--output=json',$larger.active_disk)) -join "`n" | ConvertFrom-Json
+    Assert-Condition ($largerInfo.'virtual-size' -eq 129GB -and $larger.active_disk -ne $active) 'Expansion writes a new larger overlay'
+    Invoke-ReimsTool $QemuIo @('-f','qcow2','-c','read -P 0x7a 0 512',$larger.active_disk) | Out-Null
+    Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action ExpandDisk -DiskGiB 128 } '縮小'
+    Assert-Condition ((Get-FileHash $base).Hash -eq $baseHash) 'Expansion preserves the base disk'
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
 
     & (Join-Path $testScripts 'snapshot.ps1') -Action Create -Name baseline -QemuImg $QemuImg | Out-Null
     $changed = Get-ReimsVmConfig
