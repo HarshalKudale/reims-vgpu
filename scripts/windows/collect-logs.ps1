@@ -13,7 +13,7 @@ $hostReport = [ordered]@{
 }
 Write-ReimsJson (Join-Path $destination 'host.json') $hostReport
 foreach ($file in @('config.json', 'media.json', 'opencore.json', 'runtime.json')) {
-    $source = Join-Path $ProjectRoot "vm/state/$file"
+    $source = Join-Path $VmRoot "state/$file"
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $destination }
 }
 $runtime = Get-ReimsRuntime

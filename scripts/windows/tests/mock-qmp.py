@@ -30,6 +30,12 @@ class QmpHandler(socketserver.StreamRequestHandler):
                 result = {'running': self.server.state == 'running', 'status': self.server.state}
             elif command == 'query-block':
                 result = []
+            elif command == 'qom-list':
+                result = [{'name': key} for key in self.server.usb]
+            elif command == 'device_add':
+                self.server.usb.add(request['arguments']['id'])
+            elif command == 'device_del':
+                self.server.usb.remove(request['arguments']['id'])
             elif command == 'fixture-echo':
                 result = request['arguments']
             elif command == 'screendump':
@@ -56,5 +62,6 @@ class QmpHandler(socketserver.StreamRequestHandler):
 with socketserver.ThreadingTCPServer(('127.0.0.1', 0), QmpHandler) as server:
     server.daemon_threads = True
     server.state = 'running'
+    server.usb = set()
     options.ready.write_text(json.dumps({'port': server.server_address[1]}), encoding='utf-8')
     server.serve_forever(poll_interval=0.05)

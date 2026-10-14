@@ -6,7 +6,7 @@ param(
     [string]$QemuImg
 )
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
-$snapshots = Join-Path $ProjectRoot 'vm/snapshots'
+$snapshots = Join-Path $VmRoot 'snapshots'
 if ($Action -eq 'List') {
     if (Test-Path -LiteralPath $snapshots) {
         Get-ChildItem -LiteralPath $snapshots -Directory | ForEach-Object {
@@ -22,7 +22,7 @@ $config = Get-ReimsVmConfig
 $QemuImg = Get-ReimsTool 'qemu-img.exe' $QemuImg
 $directory = Join-Path $snapshots $Name
 $manifest = Join-Path $directory 'snapshot.json'
-$next = Join-Path $ProjectRoot ("vm/disks/" + [guid]::NewGuid().ToString() + '.qcow2')
+$next = Join-Path $VmRoot ("disks/" + [guid]::NewGuid().ToString() + '.qcow2')
 if ($Action -eq 'Create') {
     if (Test-Path -LiteralPath $directory) { throw "Snapshot already exists: $Name" }
     Invoke-ReimsTool $QemuImg @('check', '-q', $config.active_disk) | Out-Null
@@ -48,10 +48,10 @@ if ($Action -eq 'Create') {
     }
     Invoke-ReimsTool $QemuImg @('check', '-q', $snapshot.disk) | Out-Null
     Invoke-ReimsTool $QemuImg @('create', '-f', 'qcow2', '-F', 'qcow2', '-b', $snapshot.disk, $next) | Out-Null
-    $vars = Join-Path $ProjectRoot ("vm/firmware/OVMF_VARS-" + [guid]::NewGuid().ToString() + '.fd')
+    $vars = Join-Path $VmRoot ("firmware/OVMF_VARS-" + [guid]::NewGuid().ToString() + '.fd')
     Copy-Item -LiteralPath $snapshot.firmware_vars -Destination $vars
     $config.firmware_vars = $vars
 }
 $config.active_disk = $next
-Write-ReimsJson (Join-Path $ProjectRoot 'vm/state/config.json') $config
+Write-ReimsJson (Join-Path $VmRoot 'state/config.json') $config
 "$Action snapshot '$Name'; next boot writes $next. Previous disks are retained."

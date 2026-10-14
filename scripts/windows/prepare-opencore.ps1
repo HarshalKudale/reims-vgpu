@@ -5,12 +5,14 @@ param(
     [string]$QemuImg,
     [string]$FirmwareDirectory,
     [switch]$GenerateIdentity,
+    [string]$IdentityFile,
     [ValidateSet('Keep','Enable','Disable')][string]$AppleAccountCompatibility = 'Keep',
     [switch]$Rebuild
 )
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 Assert-ReimsVmStopped
 if ($GenerateIdentity -and !$Rebuild) { throw 'Use -GenerateIdentity with -Rebuild.' }
+if ($IdentityFile -and (!$Rebuild -or $GenerateIdentity)) { throw 'Use -IdentityFile with -Rebuild, without -GenerateIdentity.' }
 if ($AppleAccountCompatibility -ne 'Keep' -and !$Rebuild) { throw 'Use -AppleAccountCompatibility with -Rebuild.' }
 $downloads = Join-Path $ProjectRoot '.work/downloads'
 $releasePath = Join-Path $downloads "OpenCore-$Version-release.json"
@@ -34,7 +36,7 @@ $package = Join-Path $downloads "OpenCore-$Version"
 if (!(Test-Path -LiteralPath (Join-Path $package 'Docs/Sample.plist'))) { Expand-Archive -LiteralPath $archive -DestinationPath $package -Force }
 $QemuImg = Get-ReimsTool 'qemu-img.exe' $QemuImg
 $python = Get-ReimsTool 'python.exe'
-$destination = Join-Path $ProjectRoot "vm/firmware/opencore-$Version"
+$destination = Join-Path $VmRoot "firmware/opencore-$Version"
 $efiRoot = Join-Path $destination 'root'
 New-Item -ItemType Directory -Force -Path (Join-Path $efiRoot 'EFI/BOOT'), (Join-Path $efiRoot 'EFI/OC/Drivers') | Out-Null
 foreach ($relative in @('BOOT/BOOTx64.efi', 'OC/OpenCore.efi', 'OC/Drivers/OpenRuntime.efi', 'OC/Drivers/OpenPartitionDxe.efi', 'OC/Drivers/OpenHfsPlus.efi')) {
@@ -80,12 +82,14 @@ target.write_bytes(plistlib.dumps(c, sort_keys=False))
 }
 if ($GenerateIdentity) {
     $vmConfig = Get-ReimsVmConfig
-    $pairs = (Invoke-ReimsTool (Join-Path $package 'Utilities/macserial/macserial.exe') @('-m', 'iMac20,1', '-n', '1')) -join "`n"
+    $model = & $python -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["PlatformInfo"]["Generic"]["SystemProductName"])' $plist
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot read the installed Mac model.' }
+    $pairs = (Invoke-ReimsTool (Join-Path $package 'Utilities/macserial/macserial.exe') @('-m', $model, '-n', '1')) -join "`n"
     $match = [regex]::Match($pairs, '^([A-Z0-9]{12})\s*\|\s*([A-Z0-9]{17})$', [Text.RegularExpressions.RegexOptions]::Multiline)
     if (!$match.Success) { throw 'macserial did not return a serial/MLB pair.' }
-    $identityPath = Join-Path $ProjectRoot 'vm/state/opencore-identity.json'
+    $identityPath = Join-Path $VmRoot 'state/opencore-identity.json'
     Write-ReimsJson $identityPath @{
-        model = 'iMac20,1'; serial = $match.Groups[1].Value
+        model = $model; serial = $match.Groups[1].Value
         mlb = $match.Groups[2].Value; mac = $vmConfig.mac
     }
     $backup = Join-Path $ProjectRoot ('.work/diagnostics/opencore-before-identity-' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff') + '.plist')
@@ -111,6 +115,41 @@ manifest.write_text(json.dumps(i, indent=2) + '\n', encoding='utf-8')
     "Generated a VM-specific identity; preserved SystemUUID. Backup: $backup"
 }
 $validate = Join-Path $package 'Utilities/ocvalidate/ocvalidate.exe'
+if ($IdentityFile) {
+    [void](Assert-ReimsArtifactPath $IdentityFile)
+    $backup = Join-Path $ProjectRoot ('.work/diagnostics/opencore-before-edit-' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff') + '.plist')
+    Copy-Item -LiteralPath $plist -Destination $backup
+    $candidate = "$backup.candidate"
+    $identityEdit = @'
+import json, pathlib, plistlib, re, sys, uuid
+source, destination, identity = map(pathlib.Path, sys.argv[1:])
+c = plistlib.loads(source.read_bytes())
+i = json.loads(identity.read_text(encoding='utf-8-sig'))
+assert set(i) == {'model','serial','mlb','uuid','rom'}, 'Pass all five identity fields'
+assert all(isinstance(v,str) for v in i.values()), 'Identity fields must be strings'
+i = {k:v.strip() for k,v in i.items()}
+assert re.fullmatch(r'(?:iMac|MacPro|Macmini|MacBookPro|MacBookAir|MacBook)\d+,\d+', i['model']), 'Invalid Mac model'
+assert re.fullmatch(r'[A-Z0-9]{10,12}', i['serial']), 'Serial must be 10 to 12 uppercase letters/digits'
+assert re.fullmatch(r'[A-Z0-9]{17}', i['mlb']), 'MLB must be 17 uppercase letters/digits'
+u = uuid.UUID(i['uuid']); assert u.int, 'UUID cannot be zero'
+assert re.fullmatch(r'[0-9A-Fa-f]{12}', i['rom']), 'ROM must be 12 hex digits'
+rom = bytes.fromhex(i['rom']); assert any(rom) and not rom[0] & 1, 'ROM must be a nonzero unicast address'
+c['PlatformInfo']['Generic'].update(SystemProductName=i['model'],SystemSerialNumber=i['serial'],
+    MLB=i['mlb'],SystemUUID=str(u).upper(),ROM=rom)
+c['PlatformInfo'].update(Automatic=True,UpdateDataHub=True,UpdateNVRAM=True,UpdateSMBIOS=True)
+destination.write_bytes(plistlib.dumps(c,sort_keys=False))
+i.update(uuid=str(u).upper(),rom=rom.hex()); identity.write_text(json.dumps(i),encoding='utf-8')
+'@
+    $identityEdit | & $python - $plist $candidate $IdentityFile
+    if ($LASTEXITCODE -ne 0) { throw '識別情報の形式を確認してください。元の設定は保持されています。' }
+    $edited = Get-Content -Raw -LiteralPath $IdentityFile | ConvertFrom-Json
+    $models = (Invoke-ReimsTool (Join-Path $package 'Utilities/macserial/macserial.exe') @('-l')) -join "`n"
+    if ($models -notmatch ('(?m)^\s*Model:\s*' + [regex]::Escape($edited.model) + '\s*$')) { throw 'OpenCore が認識する Mac モデルを指定してください。' }
+    Invoke-ReimsTool $validate @($candidate) | Out-Null
+    Move-Item -LiteralPath $candidate -Destination $plist -Force
+    Copy-Item -LiteralPath $IdentityFile -Destination (Join-Path $VmRoot 'state/opencore-identity.json') -Force
+    "識別情報を保存しました。変更前の設定: $backup"
+}
 if ($AppleAccountCompatibility -ne 'Keep') {
     $backup = Join-Path $ProjectRoot ('.work/diagnostics/opencore-before-account-' + (Get-Date -Format 'yyyyMMdd-HHmmss-ffff') + '.plist')
     Copy-Item -LiteralPath $plist -Destination $backup
@@ -144,7 +183,7 @@ $validation = Invoke-ReimsTool $validate @($plist)
 $validation | Set-Content -LiteralPath (Join-Path $destination 'ocvalidate.log') -Encoding utf8NoBOM
 $image = Join-Path $destination 'OpenCore.img'
 $configHash = (Get-FileHash -LiteralPath $plist).Hash
-$manifestPath = Join-Path $ProjectRoot 'vm/state/opencore.json'
+$manifestPath = Join-Path $VmRoot 'state/opencore.json'
 if (!$Rebuild -and (Test-Path -LiteralPath $image) -and (Test-Path -LiteralPath $manifestPath)) {
     $previous = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     if ($previous.image -eq $image -and ($previous.config_sha256 -ne $configHash -or
@@ -173,7 +212,7 @@ $varsSource = Join-Path $FirmwareDirectory 'edk2-i386-vars.fd'
 foreach ($source in @($codeSource, $varsSource)) {
     if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Incomplete OVMF pair: $source" }
 }
-$firmware = Join-Path $ProjectRoot 'vm/firmware'
+$firmware = Join-Path $VmRoot 'firmware'
 $code = Join-Path $firmware 'OVMF_CODE.fd'
 $varsTemplate = Join-Path $firmware 'OVMF_VARS.template.fd'
 foreach ($pair in @(@($codeSource, $code), @($varsSource, $varsTemplate))) {

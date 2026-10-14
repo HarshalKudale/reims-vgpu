@@ -67,6 +67,7 @@ try {
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off') 'WHPX uses QEMU clock-frequency leaves for macOS, without Hyper-V enlightenments'
     Assert-Condition ('tcg' -notin $command) 'No automatic TCG fallback'
     Assert-Condition ('-no-shutdown' -in $command) 'Normal power-off retains the QEMU process'
+    Assert-Condition ('ICH9-LPC.disable_s3=1' -in $command -and 'ICH9-LPC.disable_s4=1' -in $command) 'Unsupported ACPI sleep and hibernation are not advertised'
     Assert-Condition ($command[$command.IndexOf('-L') + 1] -eq (ConvertTo-ReimsQemuPath (Join-Path $testRoot 'vendor/qemu/pc-bios'))) 'ROM lookup is independent of the QEMU build directory'
     Assert-Condition (($command | Where-Object { $_ -like 'id=installer,*' }) -match 'snapshot=on') 'APM original is protected by an overlay'
     Assert-Condition (($command | Where-Object { $_ -like 'id=opencore,*' }) -match 'snapshot=on') 'OpenCore template is protected by an overlay'
@@ -167,6 +168,18 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -Cpus 4 -MemoryMiB 4096 -Resolution 2560x1440 -Audio dsound | Out-Null
     $hardware = Get-ReimsVmConfig
     Assert-Condition ($hardware.cpus -eq 4 -and $hardware.memory_mib -eq 4096 -and $hardware.audio -eq 'dsound' -and $hardware.resolution -eq '2560x1440') 'Hardware editor persists actual CPU, RAM, sound and resolution'
+    $status = & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action Status | ConvertFrom-Json
+    Assert-Condition ($status.with_installer -is [bool] -and !$status.with_installer) 'Installer status is a JSON boolean, not a PowerShell switch object'
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -WithInstaller -Microphone | Out-Null
+    $status = & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action Status | ConvertFrom-Json
+    Assert-Condition ($status.with_installer -is [bool] -and $status.with_installer -and $status.microphone -is [bool] -and $status.microphone) 'Enabled media and microphone persist as booleans'
+    $audioArgs = Get-ReimsQemuArguments (Get-ReimsVmConfig) $testRoot
+    Assert-Condition ('usb-audio,id=microphone,input=on,audiodev=mic0,bus=xhci.0' -in $audioArgs) 'Microphone adds a capture device'
+    $usbConfig=Get-ReimsVmConfig
+    $usbConfig | Add-Member usb_devices @([pscustomobject]@{id='hostusb-2-11_2-0fd90080';bus=2;port='11.2';vendor='0fd9';product='0080';label='fixture'})
+    $usbArgs=Get-ReimsQemuArguments $usbConfig $testRoot
+    $usbJson=@($usbArgs | Where-Object { $_.StartsWith('{') } | ConvertFrom-Json | Where-Object driver -EQ 'usb-host')
+    Assert-Condition ($usbJson.Count -eq 1 -and $usbJson[0].hostport -eq '11.2' -and !$usbJson[0].PSObject.Properties['hostaddr']) 'VM launch restores only saved USB port filters'
     Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetHardware -MemoryMiB 4097 } '4 MiB'
     Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action SetNetwork -Network bridge -Adapter 'not-a-real-adapter' } 'TAP-Windows'
     & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action ExpandDisk -DiskGiB 129 | Out-Null
@@ -176,6 +189,12 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     Invoke-ReimsTool $QemuIo @('-f','qcow2','-c','read -P 0x7a 0 512',$larger.active_disk) | Out-Null
     Assert-Throws { & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action ExpandDisk -DiskGiB 128 } '縮小'
     Assert-Condition ((Get-FileHash $base).Hash -eq $baseHash) 'Expansion preserves the base disk'
+    & (Join-Path $testScripts 'manager-backend.ps1') -Root $testRoot -Action OptimizeDisk | Out-Null
+    $optimized = Get-ReimsVmConfig
+    $chain = (Invoke-ReimsTool $QemuImg @('info','--backing-chain','--output=json',$optimized.active_disk)) -join "`n" | ConvertFrom-Json
+    Assert-Condition (@($chain).Count -eq 2) 'Disk consolidation leaves one writable overlay and the preserved base'
+    Invoke-ReimsTool $QemuImg @('compare','-f','qcow2','-F','qcow2',$larger.active_disk,$optimized.active_disk) | Out-Null
+    Assert-Condition (Test-Path $larger.active_disk) 'Consolidation keeps the previous disk'
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
 
     & (Join-Path $testScripts 'snapshot.ps1') -Action Create -Name baseline -QemuImg $QemuImg | Out-Null
@@ -246,6 +265,10 @@ efi[128:132]=b'PE\0\0'; struct.pack_into('<H',efi,132,0x8664)
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $restored
     Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -WithoutInstaller } 'Launch settings changed'
     Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -Headless } 'Launch settings changed'
+    $restored | Add-Member -Force usb_devices @($usbConfig.usb_devices)
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $restored
+    Assert-Throws { & (Join-Path $testScripts 'start.ps1') -Qemu $python -Paused } 'USB selections differ'
+    Invoke-ReimsQmp $runtime device_add (Get-ReimsUsbArgument $usbConfig.usb_devices[0]) | Out-Null
     & (Join-Path $testScripts 'start.ps1') -Qemu $python -Paused | Out-Null
     Assert-Condition ((Invoke-ReimsQmp $runtime 'query-status').status -eq 'prelaunch') 'Paused power-on resets without running CPUs'
     Invoke-ReimsQmp $runtime 'cont' | Out-Null

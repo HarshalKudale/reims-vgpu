@@ -8,7 +8,7 @@ try {
     $packages = @(
         'make', 'diffutils', 'bison', 'flex',
         'clang', 'llvm', 'llvm-tools', 'lld', 'cmake', 'meson', 'ninja', 'python',
-        'glib2', 'pixman', 'pkgconf', 'libslirp', 'SDL2', 'vulkan-headers',
+        'glib2', 'pixman', 'pkgconf', 'libslirp', 'libusb', 'SDL2', 'vulkan-headers',
         'vulkan-loader', 'vulkan-validation-layers', 'spirv-tools'
     ) | ForEach-Object { if ($_ -in @('make', 'diffutils', 'bison', 'flex')) { $_ } else { 'mingw-w64-ucrt-x86_64-' + $_ } }
     Invoke-ReimsMsys ('mkdir -p "$XDG_CACHE_HOME/pacman" && pacman -S --noconfirm --needed --cachedir "$XDG_CACHE_HOME/pacman" --logfile "$TEMP/../diagnostics/pacman-install.log" ' + ($packages -join ' '))

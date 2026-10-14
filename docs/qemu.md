@@ -1507,3 +1507,27 @@ were confirmed switching the guest between ABC and Japanese input. QMP
 delivery of the same two keys also changed the current Carbon input source
 to the expected identifiers. Command and Ro/underscore were confirmed
 separately with the physical keyboard.
+
+On 2026-10-14 the Windows guest's PerfPowerServices repeatedly enumerated
+SMC keys and consumed most of a CPU. `#KEY`, key-by-index and key-info
+responses removed that loop. macOS sends four argument bytes for commands
+0x12/0x13; waiting for a fifth length byte blocked login and left a black
+screen. Only read-key 0x10 requires the length. The qtest uses macOS's
+four-byte transactions and also checks Linux's optional fifth byte. After
+the fix the real guest reached login and desktop and PerfPowerServices
+returned to low single-digit/idle CPU usage. Guest samples stay private.
+
+Windows UsbDk redirects a USB device when libusb opens it, including an
+open made solely for a product string. Opening every device in `info
+usbhost` therefore captured unselected host storage and crashed the VM.
+Windows inventory now uses cached descriptors only; product labels come
+from Windows PnP properties. Selecting a non-storage USB controller was
+verified through the guest's IOUSB tree and returned it to Windows on
+device removal. The host's backing disk and input devices were excluded.
+
+The tested idle guest entered QMP `suspended`. `system_wakeup` returned to
+`running` but neither SSH nor frames resumed. The Windows launch profile
+now omits ACPI S3/S4 and guest setup disables automatic system sleep and
+hibernation. This does not change the library's suspend/resume API. Guest
+shutdown and power-on in the same process remain supported. USB selections
+added through QMP are checked against live device IDs when reusing it.

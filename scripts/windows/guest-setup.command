@@ -16,6 +16,8 @@ sudo chmod 644 /Library/Preferences/.GlobalPreferences.plist
 sudo defaults write /Library/Preferences/com.apple.keyboardtype keyboardtype -dict '1-1575-0' -int 42
 sudo chmod 644 /Library/Preferences/com.apple.keyboardtype.plist
 sudo /usr/sbin/systemsetup -settimezone Asia/Tokyo
+# WHPX/PVG cannot reliably restore the guest's graphics state after ACPI sleep.
+sudo /usr/bin/pmset -a sleep 0 disksleep 0 standby 0 powernap 0 hibernatemode 0
 sudo /usr/bin/ssh-keygen -A
 sudo launchctl enable system/com.openssh.sshd
 sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || sudo launchctl kickstart system/com.openssh.sshd

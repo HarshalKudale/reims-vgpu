@@ -1,6 +1,6 @@
 # Windows VM preparation and management
 
-These scripts prepare one x86_64 macOS VM in `vm/` using native Windows
+These scripts prepare x86_64 macOS VMs (the default lives in `vm/`) using native Windows
 PowerShell, Python, 7-Zip and QEMU tools. They use the project's patched QEMU
 with `apple-gfx-pci`, its `ReimsVgpu.rom`, and WHPX. Defaults are 8 vCPUs,
 8 GiB RAM, a sparse 128 GiB qcow2 disk, and one 1920×1080 display.
@@ -15,8 +15,23 @@ there is no automatic TCG fallback.
 `build/windows-manager/ReimsManager.exe` uses WPF's built-in Windows Fluent
 theme and follows the system light/dark setting. Keep the whole published
 folder: it contains the .NET runtime and the PowerShell backend. The app
-selects a project folder, then manages its existing `vm/state` configuration.
-It does not create a second set of disks behind the CLI's back.
+shows a VM library, an embedded guest console and settings in one window.
+The engine folder is separate from the selected VM's storage folder, which
+is always shown in the footer with an Open Folder button.
+
+File → New selects a name and location for a `.reimsvm` definition and its
+adjacent `.data` folder. File → Open registers an existing definition.
+Import accepts a stopped VM's VMDK, QCOW2 or raw disk, converts a copy into
+an independent QCOW2 base and creates a writable overlay. It leaves the
+source untouched. Importing storage does not guarantee that a guest prepared
+for another hypervisor will boot on this hardware. Each VM has its own
+configuration, firmware, SSH identity, snapshots and loopback ports.
+The existing `vm/` installation is registered automatically.
+
+The native QEMU window is attached only after its PID, executable and start
+time match the selected VM. It can be detached into its own window. Closing
+the manager restores that window and leaves the VM running. CLI scripts use
+the same state; set `REIMS_VM_ROOT_OVERRIDE` to select another VM directory.
 
 Build it with a Windows .NET 10 SDK:
 
@@ -74,6 +89,73 @@ The tested Tahoe 26.4 guest signs in over NAT after the OpenCore compatibility
 setting and WHPX clock fix; see [the measured Apple Account setup](windows-apple-account.md).
 The Windows JIS repair and physical-key checks are recorded in
 [windows-jis-keyboard.md](windows-jis-keyboard.md).
+
+The OpenCore page reads and edits model, serial, MLB, SystemUUID and ROM.
+Save validates all five values and the OpenCore model list, backs up the
+previous plist, validates a candidate with `ocvalidate`, then rebuilds the
+boot image. Apply/remove Apple Account compatibility preserves the identity.
+These actions require Complete Exit. Do not regenerate an identity merely
+because authentication fails.
+
+## Clipboard, audio and selected USB devices
+
+The Sharing page provides manual and opt-in automatic text clipboard
+sharing over the VM's pinned SSH connection. Unicode text up to 1 MiB is
+supported; images/files are not. Clipboard contents use stdin/stdout, never
+arguments, files or logs. Automatic sharing runs only while the app is open
+and is disabled when changing VMs. It requires a paired, logged-in guest.
+
+Speaker and microphone switches are in Hardware. Playback uses the Windows
+default output; the optional USB Microphone exposes 48 kHz stereo capture
+from the Windows default recording input. Windows microphone privacy and
+the guest app's recording permission still apply. Connect a microphone
+before starting the VM; host recording-device hotplug is not qualified.
+The DirectSound backend creates capture only when required, so a host
+without a microphone can still start and play sound.
+
+Hardware → USB lists host peripherals without opening them. Choose one and
+register automatic connection; only that VID/PID, host bus and physical port
+are saved in this VM's `usb_devices`. QEMU scans the saved filter every two
+seconds and reattaches after unplug/replug, even when the device address
+changes. The selection is restored on a full VM launch and survives guest
+power cycles. Unplugged selections remain removable; unregistering returns
+the device to Windows and removes future automatic attachment.
+
+Selection follows the same physical port. Moving it to another port requires
+reselection. A different device of the same model inserted into that exact
+port also matches; serial-number matching is not implemented. Host keyboard,
+mouse/Bluetooth input and disks containing Windows, the engine or VM are
+excluded. Guest USB storage must be ejected inside macOS before unregistering.
+
+WinUSB supports devices whose Windows driver is compatible with libusb.
+UsbDk provides generic forwarding after installing the pinned, signed UsbDk
+driver from the USB page; it may require a Windows restart. Choose UsbDk in
+Hardware and save while QEMU is fully stopped. No host driver is silently
+replaced and no unselected peripheral is opened to fetch a product name.
+
+On 2026-10-14 a selected AURA LED Controller appeared in the real guest's
+IOUSB tree, disappeared on unregister and appeared again on registration.
+Host storage and input remained on Windows. Physical cable unplug/replug
+and Stream Deck application operation still require those devices onsite.
+Synthetic checks cover changed USB addresses, absent devices, persistence,
+removal and protected-device refusal. Speaker playback completed in macOS;
+the microphone enumerated, but no physical recording input was connected.
+
+## Sleep and update discovery
+
+The Windows launcher disables ACPI S3/S4. Guest setup also disables automatic
+system sleep, disk sleep, standby, Power Nap and hibernation. A measured
+idle transition reached QMP `suspended`; wake returned `running` but left
+graphics and SSH unresponsive. Display blanking remains available. This is
+separate from manager Pause/Resume, which uses QMP stop/cont.
+
+OpenCore → Repair update discovery installs pinned official Lilu 1.7.2 and
+RestrictEvents 1.1.6 with `revpatch=sbvmm revblock=none` for Darwin 25.x.
+The plist is backed up and validated; SIP, AMFI and existing Apple Account
+patches are retained. The real 26.4 guest now lists **26.7.1 / 25G241** through
+`softwareupdate --list`. No OS update was installed. Apple Account's current
+kernel patch is deliberately limited to 25.4.0; a new kernel still needs
+boot and authentication qualification before claiming compatibility.
 
 ## Licensing
 

@@ -1,8 +1,8 @@
 #Requires -Version 7.2
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 Assert-ReimsVmStopped
-$directory = Join-Path $ProjectRoot 'vm/tools/root'
-$key = Join-Path $ProjectRoot 'vm/state/ssh/id_ed25519'
+$directory = Join-Path $VmRoot 'tools/root'
+$key = Join-Path $VmRoot 'state/ssh/id_ed25519'
 New-Item -ItemType Directory -Force -Path $directory, (Split-Path $key) | Out-Null
 if (!(Test-Path $key)) {
     Invoke-ReimsTool "$env:SystemRoot/System32/OpenSSH/ssh-keygen.exe" @('-q','-t','ed25519','-N','','-C','reims-vm-control','-f',$key)
@@ -11,7 +11,7 @@ if (!(Test-Path $key)) {
 }
 Copy-Item -LiteralPath "$key.pub" -Destination (Join-Path $directory 'authorized_key')
 Copy-Item -LiteralPath "$PSScriptRoot/guest-setup.command" -Destination (Join-Path $directory 'setup.command')
-$image = Join-Path $ProjectRoot 'vm/tools/ReimsTools.img'
+$image = Join-Path $VmRoot 'tools/ReimsTools.img'
 Invoke-ReimsTool (Get-ReimsTool 'qemu-img.exe') @('convert','-f','vvfat','-O','raw',('fat:'+$directory.Replace('\','/')),"$image.partial") | Out-Null
 $python = Get-ReimsTool 'python.exe'
 @'

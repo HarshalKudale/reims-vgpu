@@ -13,7 +13,7 @@ param(
 . "$PSScriptRoot/start.ps1" -FunctionsOnly
 Assert-ReimsVmStopped
 if ($QmpPort -eq $SshPort) { throw 'QMP and SSH must use different ports.' }
-$state = Join-Path $ProjectRoot 'vm/state'
+$state = Join-Path $VmRoot 'state'
 $mediaState = Join-Path $state 'media.json'
 if (!$Iso -and (Test-Path -LiteralPath $mediaState)) {
     $Iso = (Get-Content -Raw -LiteralPath $mediaState | ConvertFrom-Json).path
@@ -25,7 +25,7 @@ $length = $mediaFile.Length
 $modified = $mediaFile.LastWriteTimeUtc.Ticks
 $SevenZip = Get-ReimsTool '7z.exe' $SevenZip
 $python = Get-ReimsTool 'python.exe'
-$inspection = Join-Path $ProjectRoot 'vm/media/inspection'
+$inspection = Join-Path $VmRoot 'media/inspection'
 New-Item -ItemType Directory -Force -Path $inspection, $state | Out-Null
 $listing = Invoke-ReimsTool $SevenZip @('l', '-slt', $Iso)
 $listing | Set-Content -LiteralPath (Join-Path $inspection 'contents.txt') -Encoding utf8NoBOM
@@ -89,7 +89,7 @@ if (Test-Path -LiteralPath $configPath) {
     'Existing disks, NVRAM and VM settings retained; installer inspection updated.'
     return
 }
-$disks = Join-Path $ProjectRoot 'vm/disks'
+$disks = Join-Path $VmRoot 'disks'
 New-Item -ItemType Directory -Force -Path $disks | Out-Null
 $baseDisk = Join-Path $disks 'base.qcow2'
 $activeDisk = Join-Path $disks 'current.qcow2'
@@ -104,7 +104,7 @@ if ($activeInfo.format -ne 'qcow2' -or !$activeInfo.PSObject.Properties['full-ba
     [IO.Path]::GetFullPath($activeInfo.'full-backing-filename') -ne $baseDisk) {
     throw 'Existing current disk is not an overlay of this base disk.'
 }
-$vars = Join-Path $ProjectRoot 'vm/firmware/OVMF_VARS.fd'
+$vars = Join-Path $VmRoot 'firmware/OVMF_VARS.fd'
 if (!(Test-Path -LiteralPath $vars)) { Copy-Item -LiteralPath $oc.firmware_vars_template -Destination $vars }
 $random = [Security.Cryptography.RandomNumberGenerator]::GetBytes(3)
 $config = [ordered]@{

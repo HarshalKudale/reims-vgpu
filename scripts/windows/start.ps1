@@ -10,11 +10,13 @@ param(
     [switch]$FunctionsOnly
 )
 . "$PSScriptRoot/environment.ps1"
+. "$PSScriptRoot/usb.ps1"
 
 function Assert-ReimsArtifactPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     $prefix = $ProjectRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    if (!$full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+    $vmPrefix = $VmRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (!$full.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -and !$full.StartsWith($vmPrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Artifact must stay under the project: $full"
     }
     return $full
@@ -29,6 +31,8 @@ function Write-ReimsJson([string]$Path, $Value) {
 
 function Get-ReimsTool([string]$Name, [string]$ExplicitPath) {
     if ($ExplicitPath) { return (Get-Item -LiteralPath $ExplicitPath -ErrorAction Stop).FullName }
+    $built = Join-Path $ProjectRoot "build/qemu/$Name"
+    if ($Name -like 'qemu-*' -and (Test-Path -LiteralPath $built -PathType Leaf)) { return $built }
     $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return $command.Source }
     $candidates = @((Join-Path $MsysRoot "ucrt64/bin/$Name"), (Join-Path $MsysRoot "mingw64/bin/$Name"))
@@ -45,12 +49,18 @@ function Invoke-ReimsTool([string]$Program, [string[]]$Arguments) {
 }
 
 function Get-ReimsVmConfig {
-    $path = Join-Path $ProjectRoot 'vm/state/config.json'
+    $path = Join-Path $VmRoot 'state/config.json'
     if (!(Test-Path -LiteralPath $path)) { throw 'Run prepare-vm.ps1 first.' }
     $config = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
     if ($config.schema -ne 1) { throw 'Unknown VM configuration schema.' }
     foreach ($key in @('base_disk', 'active_disk', 'opencore', 'firmware_code', 'firmware_vars', 'rom')) {
         [void](Assert-ReimsArtifactPath $config.$key)
+    }
+    foreach ($key in @('base_disk', 'active_disk', 'opencore', 'firmware_vars')) {
+        $vmPrefix = $VmRoot.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+        if (![IO.Path]::GetFullPath($config.$key).StartsWith($vmPrefix,[StringComparison]::OrdinalIgnoreCase)) {
+            throw "VM input must belong to the selected VM folder: $key"
+        }
     }
     if ($config.active_disk -eq $config.base_disk) { throw 'Refusing to boot or modify the base disk directly; use a qcow2 overlay.' }
     if ($config.qmp_port -lt 1024 -or $config.qmp_port -gt 65535 -or $config.ssh_port -lt 1024 -or
@@ -69,7 +79,7 @@ function Get-ReimsVmProcess($Runtime) {
 }
 
 function Get-ReimsRuntime {
-    $path = Join-Path $ProjectRoot 'vm/state/runtime.json'
+    $path = Join-Path $VmRoot 'state/runtime.json'
     if (Test-Path -LiteralPath $path) { return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json }
     return $null
 }
@@ -167,6 +177,7 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         '-name', 'reims-windows', '-machine', 'q35', '-accel', $(if ($DiagnosticTcg) { 'tcg' } else { 'whpx,hyperv=off' }),
         '-cpu', $(if ($DiagnosticTcg) { 'max,vendor=GenuineIntel' } else { $Config.cpu }), '-smp', "$($Config.cpus),sockets=1,cores=$($Config.cpus),threads=1", '-m', "$($Config.memory_mib)M",
         '-global', 'ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off',
+        '-global', 'ICH9-LPC.disable_s3=1', '-global', 'ICH9-LPC.disable_s4=1',
         '-device', 'pcie-root-port,bus=pcie.0,addr=0x1,slot=1,x-speed=16,x-width=32',
         '-device', 'isa-applesmc,osk=ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc',
         '-drive', "if=pflash,format=raw,readonly=on,file=$code",
@@ -179,19 +190,26 @@ function Get-ReimsQemuArguments($Config, [string]$RunDirectory, [switch]$Paused,
         '-netdev', (Get-ReimsNetworkArgument $Config),
         '-device', "virtio-net-pci,netdev=net0,id=net0,mac=$($Config.mac),addr=0x3", '-vga', 'none',
         '-device', (ConvertTo-Json -InputObject $gfx -Depth 4 -Compress),
-        '-device', 'qemu-xhci,id=xhci,addr=0x5,conditional-intr-mapping=on',
+        '-device', 'qemu-xhci,id=xhci,addr=0x5,p2=8,p3=6,conditional-intr-mapping=on',
         '-device', 'usb-kbd,id=kbd,bus=xhci.0', '-device', 'usb-tablet,id=tablet,bus=xhci.0',
-        '-audiodev', "$audio,id=snd0", '-device', 'usb-audio,id=audio,audiodev=snd0,bus=xhci.0',
+        '-audiodev', "$audio,id=snd0,in.voices=0", '-device', 'usb-audio,id=audio,audiodev=snd0,bus=xhci.0',
         '-display', 'none', '-monitor', 'none', '-serial', "file:$serial", '-msg', 'timestamp=on',
         '-qmp', "tcp:127.0.0.1:$($Config.qmp_port),server=on,wait=off"
     )
+    if ($Config.PSObject.Properties['microphone'] -and $Config.microphone) {
+        $qemuArguments += @('-audiodev','dsound,id=mic0,in.voices=1',
+            '-device','usb-audio,id=microphone,input=on,audiodev=mic0,bus=xhci.0')
+    }
+    foreach ($usb in @(Get-ReimsUsbSelections $Config)) {
+        $qemuArguments += @('-device', (Get-ReimsUsbArgument $usb | ConvertTo-Json -Compress))
+    }
     if (!$WithoutInstaller) {
         $media = ConvertTo-ReimsQemuPath $Config.iso
         $protection = if ($Config.media_kind -eq 'disk') { 'snapshot=on' } else { 'media=cdrom,readonly=on' }
         $qemuArguments += '-drive', "id=installer,if=none,format=raw,$protection,file=$media"
         $qemuArguments += '-device', $(if ($Config.media_kind -eq 'disk') { 'ide-hd,bus=sata.4,drive=installer' } else { 'ide-cd,bus=sata.4,drive=installer' })
     }
-    $toolsImage = Join-Path $ProjectRoot 'vm/tools/ReimsTools.img'
+    $toolsImage = Join-Path $VmRoot 'tools/ReimsTools.img'
     if (Test-Path -LiteralPath $toolsImage) {
         $qemuArguments += '-drive', ('id=tools,if=none,format=raw,snapshot=on,file=' + (ConvertTo-ReimsQemuPath $toolsImage))
         $qemuArguments += '-device', 'ide-hd,id=tools,bus=sata.5,drive=tools'
@@ -205,7 +223,7 @@ if ($FunctionsOnly) { return }
 $config = Get-ReimsVmConfig
 if (!$Qemu) { $Qemu = Join-Path $ProjectRoot 'build/qemu/qemu-system-x86_64.exe' }
 $Qemu = [IO.Path]::GetFullPath($Qemu)
-$run = Join-Path $ProjectRoot ("vm/logs/" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+$run = Join-Path $VmRoot ("logs/" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 $qemuArgs = Get-ReimsQemuArguments $config $run -Paused:$Paused -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg
 $runtime = Get-ReimsRuntime
 if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
@@ -215,8 +233,12 @@ if (!$DryRun -and $runtime -and (Get-ReimsVmProcess $runtime)) {
     }
     $previous = Get-Content -Raw -LiteralPath (Join-Path $runtime.run_directory 'command.json') | ConvertFrom-Json
     # Launch-time -S does not constrain a retained VM's next power-on.
-    $original = @($previous.arguments | Where-Object { $_ -ne '-S' })
-    $expected = @(Get-ReimsQemuArguments $config $runtime.run_directory -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg | Where-Object { $_ -ne '-S' })
+    $original = @(Remove-ReimsUsbLaunchArguments $previous.arguments | Where-Object { $_ -ne '-S' })
+    $expected = @(Remove-ReimsUsbLaunchArguments (Get-ReimsQemuArguments $config $runtime.run_directory -Headless:$Headless -WithoutInstaller:$WithoutInstaller -DiagnosticTcg:$DiagnosticTcg) | Where-Object { $_ -ne '-S' })
+    $selectedUsb=@(Get-ReimsUsbSelections $config | ForEach-Object id | Sort-Object)
+    $peripherals=Invoke-ReimsQmp $runtime qom-list @{path='/machine/peripheral'}
+    $liveUsb=@($peripherals | Where-Object name -Like 'hostusb-*' | ForEach-Object name | Sort-Object)
+    if (($selectedUsb -join ',') -ne ($liveUsb -join ',')) { throw 'USB selections differ from the retained VM. Exit QEMU before starting.' }
     if (![string]::Equals($runtime.executable, $Qemu, [StringComparison]::OrdinalIgnoreCase) -or
         $previous.headless -ne [bool]$Headless -or
         (ConvertTo-Json -InputObject $original -Compress) -ne (ConvertTo-Json -InputObject $expected -Compress)) {
@@ -247,6 +269,7 @@ if ($DryRun) {
     return
 }
 Assert-ReimsVmStopped
+Assert-ReimsUsbSafe @(Get-ReimsUsbSelections $config)
 if (!$DiagnosticTcg -and !$whpx.ready) {
     throw 'WHPX unavailable. Enable Windows Hypervisor Platform in an elevated Windows session and reboot. No VM was started; no TCG fallback.'
 }
@@ -275,6 +298,8 @@ New-Item -ItemType Directory -Force -Path $run | Out-Null
 Write-ReimsJson (Join-Path $run 'command.json') $launch
 $env:REIMS_VGPU_LOG = 'info'
 $env:REIMS_VGPU_STATS = '1'
+if ($config.PSObject.Properties['usb_backend'] -and $config.usb_backend -eq 'usbdk') { $env:REIMS_USB_BACKEND = 'usbdk' }
+else { Remove-Item Env:REIMS_USB_BACKEND -ErrorAction SilentlyContinue }
 if ($Headless) { $env:REIMS_VGPU_WINDOW = '0' } else { Remove-Item Env:REIMS_VGPU_WINDOW -ErrorAction SilentlyContinue }
 $process = Start-Process -FilePath $Qemu -ArgumentList (($qemuArgs | ForEach-Object { ConvertTo-ReimsWindowsArgument $_ }) -join ' ') -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run 'stdout.log') -RedirectStandardError (Join-Path $run 'stderr.log') -PassThru
 $runtime = [ordered]@{
@@ -282,7 +307,7 @@ $runtime = [ordered]@{
     qmp_port = $config.qmp_port; run_directory = $run; disk = $config.active_disk
     diagnostic_only = [bool]$DiagnosticTcg
 }
-Write-ReimsJson (Join-Path $ProjectRoot 'vm/state/runtime.json') $runtime
+Write-ReimsJson (Join-Path $VmRoot 'state/runtime.json') $runtime
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
