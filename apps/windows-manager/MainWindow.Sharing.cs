@@ -55,7 +55,9 @@ public partial class MainWindow
     private async void CopyFromGuest(object sender, RoutedEventArgs e)
     {
         if (clipboardBusy) return; clipboardBusy = true;
-        try { string text = await GuestClipboard.Transfer(VmDirectory, null, clipboardCancel.Token); if (text.Length > 0) Clipboard.SetText(text); ClipboardStatus.Text = "Windows にコピーしました。"; }
+        var token = clipboardCancel.Token;
+        try { string text = await GuestClipboard.Transfer(VmDirectory, null, token); token.ThrowIfCancellationRequested(); if (text.Length > 0) Clipboard.SetText(text); ClipboardStatus.Text = "Windows にコピーしました。"; }
+        catch (OperationCanceledException) { }
         catch (Exception error) { ClipboardStatus.Text = error.Message; }
         finally { clipboardBusy = false; }
     }
