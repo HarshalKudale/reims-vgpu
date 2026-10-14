@@ -62,6 +62,13 @@ try {
     $badConfig.active_disk = $base
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $badConfig
     Assert-Throws { Get-ReimsVmConfig } 'base disk directly'
+    $sharedBaseConfig=$config.PSObject.Copy()
+    $sharedBaseConfig.base_disk=Join-Path $testRoot 'shared/base.qcow2'
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $sharedBaseConfig
+    Assert-Condition ((Get-ReimsVmConfig).base_disk -eq $sharedBaseConfig.base_disk) 'Read-only base chains can be shared inside the project'
+    $sharedBaseConfig.active_disk=Join-Path $testRoot 'shared/writable.qcow2'
+    Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $sharedBaseConfig
+    Assert-Throws { Get-ReimsVmConfig } 'VM input must belong'
     Write-ReimsJson (Join-Path $testRoot 'vm/state/config.json') $config
     $command = Get-ReimsQemuArguments $config (Join-Path $testRoot 'vm/logs/test')
     Assert-Condition ($command[$command.IndexOf('-accel') + 1] -eq 'whpx,hyperv=off') 'WHPX uses QEMU clock-frequency leaves for macOS, without Hyper-V enlightenments'
