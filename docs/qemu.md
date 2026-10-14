@@ -1729,3 +1729,14 @@ now omits ACPI S3/S4 and guest setup disables automatic system sleep and
 hibernation. This does not change the library's suspend/resume API. Guest
 shutdown and power-on in the same process remain supported. USB selections
 added through QMP are checked against live device IDs when reusing it.
+
+The preserved Windows engine's 2026-10-14 validation boot at 1920x1080
+logged XNU RTCLOCK 3190000000 Hz (3187198000 calibrated), close to the
+native host's measured 3.187 GHz. The earlier 6.4 GHz discrepancy did not
+recur in this run. This alone does not establish GPU timeout correctness.
+The baseline reached the desktop and Safari. Its ACPI shutdown exceeded
+50 seconds while restored Simulator services were active, then reached
+QMP `shutdown` and exited QEMU cleanly. Keep a shutdown deadline failure
+separate from a guest GPU hang, and check the guest and QMP state before
+terminating the engine. The comparison uses sibling writable overlays
+over an offline frozen checkpoint, with firmware and NVRAM copies.
