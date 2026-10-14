@@ -31,7 +31,13 @@ $listing = Invoke-ReimsTool $SevenZip @('l', '-slt', $Iso)
 $listing | Set-Content -LiteralPath (Join-Path $inspection 'contents.txt') -Encoding utf8NoBOM
 $paths = @($listing | Where-Object { $_ -like 'Path = *' } | ForEach-Object { $_.Substring(7) })
 $versionPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)System/Library/CoreServices/SystemVersion\.plist$' } | Select-Object -First 1
-$bootPath = $paths | Where-Object { $_.Replace('\', '/') -match '(^|/)System/Library/CoreServices/boot\.efi$' } | Select-Object -First 1
+# Tahoe's CoreServices/boot.efi is an HFS+ hard link 7-Zip lists as empty; the real file is usr/standalone/i386/boot.efi.
+$entries = @(); $current = $null
+foreach ($line in $listing) {
+    if ($line -like 'Path = *') { $current = @{ Path = $line.Substring(7); Size = 0 }; $entries += $current }
+    elseif ($current -and $line -like 'Size = *') { $current.Size = [int64]$line.Substring(7) }
+}
+$bootPath = ($entries | Where-Object { $_.Size -gt 0 -and $_.Path.Replace('\', '/') -match '(^|/)(System/Library/CoreServices|usr/standalone/i386)/boot\.efi$' } | Select-Object -First 1).Path
 if (!$versionPath -or !$bootPath) { throw 'No installer SystemVersion.plist and boot.efi found; media has not been prepared.' }
 # Extract only the two small inspection files; never expand the installer payload.
 Invoke-ReimsTool $SevenZip @('e', '-y', "-o$inspection", $Iso, $versionPath, $bootPath) | Out-Null
@@ -44,6 +50,8 @@ with image.open('rb') as f:
     iso9660 = f.read(7)[1:6] == b'CD001'
 if header[:2] == b'ER' and header[512:514] == b'PM':
     kind, container = 'disk', 'APM/HFS+'
+elif header[512:520] == b'EFI PART':
+    kind, container = 'disk', 'GPT/HFS+'
 elif iso9660:
     kind, container = 'cdrom', 'ISO9660'
 else:

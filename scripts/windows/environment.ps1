@@ -6,7 +6,7 @@ $ProjectRoot = if ($env:REIMS_PROJECT_ROOT_OVERRIDE) {
 } else {
     [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 }
-$MsysRoot = if ($env:REIMS_MSYS2_ROOT) { $env:REIMS_MSYS2_ROOT } else { 'D:\msys64' }
+$MsysRoot = if ($env:REIMS_MSYS2_ROOT) { $env:REIMS_MSYS2_ROOT } else { 'C:\msys64' }
 $VmRoot = if ($env:REIMS_VM_ROOT_OVERRIDE) { [IO.Path]::GetFullPath($env:REIMS_VM_ROOT_OVERRIDE) } else { Join-Path $ProjectRoot 'vm' }
 if ($VmRoot.TrimEnd('\','/') -eq [IO.Path]::GetPathRoot($VmRoot).TrimEnd('\','/')) { throw 'Select a VM folder, not a drive root.' }
 
